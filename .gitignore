@@ -1,0 +1,8 @@
+# ignore all the vim temp files
+*~
+*.un
+*.swp
+
+# ignore all the data files from Perseus
+*.xml
+*.xml.json

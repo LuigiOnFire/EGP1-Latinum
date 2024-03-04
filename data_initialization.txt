@@ -1,0 +1,232 @@
+################
+minGPT
+################
+
+in trainer.py
+def run(self):
+
+    train_loader = DataLoader(
+                self.train_dataset,
+                sampler=torch.utils.data.RandomSampler(self.train_dataset, replacement=True, num_samples=int(1e10)),
+                shuffle=False,
+                pin_memory=True,
+                batch_size=config.batch_size,
+                num_workers=config.num_workers,
+            )
+
+    model.train()
+    self.iter_num = 0
+    self.iter_time = time.time()
+    data_iter = iter(train_loader)
+    while True:
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(train_loader)
+            batch = next(data_iter)
+        batch = [t.to(self.device) for t in batch]
+        x, y = batch
+
+...
+
+
+
+chartgpt.py
+text = open('input.txt', 'r').read() # don't worry we won't run out of file handles
+train_dataset = CharDataset(config.data, text)
+
+... in CharDataset
+def __init__(self, config, data):
+        self.config = config
+
+        chars = sorted(list(set(data)))
+        data_size, vocab_size = len(data), len(chars)
+        print('data has %d characters, %d unique.' % (data_size, vocab_size))
+
+        self.stoi = { ch:i for i,ch in enumerate(chars) }
+        self.itos = { i:ch for i,ch in enumerate(chars) }
+        self.vocab_size = vocab_size
+        self.data = data
+
+def __getitem__(self, idx):
+        # grab a chunk of (block_size + 1) characters from the data
+        chunk = self.data[idx:idx + self.config.block_size + 1]
+        # encode every character to an integer
+        dix = [self.stoi[s] for s in chunk]
+        # return as tensors
+        x = torch.tensor(dix[:-1], dtype=torch.long)
+        y = torch.tensor(dix[1:], dtype=torch.long)
+        return x, y
+
+Method 1: setup a DataLoader with the paramaters and use it to make an iterator, and call next(iterator)
+
+################
+nanoGPT
+################
+
+train.py
+# poor man's data loader
+data_dir = os.path.join('data', dataset)
+train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+def get_batch(split):
+    data = train_data if split == 'train' else val_data
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+
+prepare.py
+input_file_path = os.path.join(os.path.dirname(__file__), 'input.txt')
+if not os.path.exists(input_file_path):
+    data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
+    with open(input_file_path, 'w') as f:
+        f.write(requests.get(data_url).text)
+
+with open(input_file_path, 'r') as f:
+    data = f.read()
+print(f"length of dataset in characters: {len(data):,}")
+
+opens input.txt and if it doesn't exist downloads it from that link
+
+# encode with tiktoken gpt2 bpe
+enc = tiktoken.get_encoding("gpt2")
+train_ids = enc.encode_ordinary(train_data)
+val_ids = enc.encode_ordinary(val_data)
+print(f"train has {len(train_ids):,} tokens")
+print(f"val has {len(val_ids):,} tokens")
+
+Method 2: Prepare step before training. Divide data text into 90% for training and 10% for evaluation. Tokenize the text in advance and save them into bin files. Load the tokens in to arrays x and y where x are the tokens and and y are the tokens to be predicted (so just offset by one basically).
+
+################
+minibert
+################
+
+config = SimpleNamespace(
+        filepath='sst-classifier.pt',
+        lr=args.lr,
+        use_gpu=args.use_gpu,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        hidden_dropout_prob=args.hidden_dropout_prob,
+        train='data/ids-sst-train.csv',
+        dev='data/ids-sst-dev.csv',
+        test='data/ids-sst-test-student.csv',
+        option=args.option,
+        dev_out = 'predictions/'+args.option+'-sst-dev-out.csv',
+        test_out = 'predictions/'+args.option+'-sst-test-out.csv'
+    )
+
+then they run train(config), which calls
+train_data, num_labels = load_data(args.train, 'train')
+dev_data = load_data(args.dev, 'valid')
+
+load_data consists of:
+def load_data(filename, flag='train'):
+    num_labels = {}
+    data = []
+    if flag == 'test':
+        with open(filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                sent = record['sentence'].lower().strip()
+                sent_id = record['id'].lower().strip()
+                data.append((sent,sent_id))
+    else:
+        with open(filename, 'r') as fp:
+            for record in csv.DictReader(fp,delimiter = '\t'):
+                sent = record['sentence'].lower().strip()
+                sent_id = record['id'].lower().strip()
+                label = int(record['sentiment'].strip())
+                if label not in num_labels:
+                    num_labels[label] = len(num_labels)
+                data.append((sent, label,sent_id))
+        print(f"load {len(data)} data from {filename}")
+
+    if flag == 'train':
+        return data, len(num_labels)
+    else:
+        return data
+
+afterwards it runs this function:
+train_dataset = SentimentDataset(train_data, args)
+
+where 
+class SentimentDataset(Dataset):
+    def __init__(self, dataset, args):
+        self.dataset = dataset
+        self.p = args
+        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.dataset[idx]
+
+    def pad_data(self, data):
+        
+        sents = [x[0] for x in data]
+        labels = [x[1] for x in data]
+        sent_ids = [x[2] for x in data]
+
+        encoding = self.tokenizer(sents, return_tensors='pt', padding=True, truncation=True)
+        token_ids = torch.LongTensor(encoding['input_ids'])
+        attention_mask = torch.LongTensor(encoding['attention_mask'])
+        labels = torch.LongTensor(labels)
+
+        return token_ids, attention_mask, labels, sents, sent_ids
+
+    def collate_fn(self, all_data):
+        token_ids, attention_mask, labels, sents, sent_ids= self.pad_data(all_data)
+
+        batched_data = {
+                'token_ids': token_ids,
+                'attention_mask': attention_mask,
+                'labels': labels,
+                'sents': sents,
+                'sent_ids': sent_ids
+            }
+
+        return batched_data
+
+    Then (returning to the train function) it initializes a dataloader
+    train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=args.batch_size,
+                                  collate_fn=train_dataset.collate_fn)
+
+    And runs the main training loop like so:
+
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0
+        num_batches = 0
+        for batch in tqdm(train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            b_ids, b_mask, b_labels = (batch['token_ids'],
+                                       batch['attention_mask'], batch['labels'])
+
+Method 3: The load_data function parses the file into a variable "data". data gets passed to a fancy BERT tokenizer that gives both token ids and an attention mask (to remove padding tokens in self attention) and places all this in the variable train_dataset. Then it sets up a DataLoader for train_dataset and steps through using tqdm on the train_dataloader. 
+
+##################
+My approach
+##################
+
+Let's set up a DataLoader and step through using tqdm like minibert. Let's also save the tokens in a bin file like nanoGPT.
+
+Basic idea:
+
+in data_prep.py:
+def perseus_json_to_string:
+grabs the json and outputs a text as a string
+
+def string_to_tokens
+takens the string and converts it to tokens
+
+def tokenize_data:
+    calls string_to_tokens and saves the file as bins
+
+in train.py:
+we then set up the dataloader in train.py and we're off to the races
