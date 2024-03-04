@@ -1,3 +1,4 @@
+import data_prep
 import model
 import torch
 import test
@@ -36,6 +37,12 @@ if __name__ = "main":
             else "cpu"
             )
     )
+
+    # run data_prep
+    data_prep.prep_data()
+
+    #setup our dataloader
+
 
     epochs = 5
     for t in range(epochs):
