@@ -22,5 +22,3 @@ class NeuralNetwork(nn.Module):
             return logits
 
 
-model = NeuralNetwork().to(device)
-print(model)
