@@ -230,3 +230,9 @@ def tokenize_data:
 
 in train.py:
 we then set up the dataloader in train.py and we're off to the races
+
+##################
+Follow up questions
+##################
+
+How do we handle encoding?

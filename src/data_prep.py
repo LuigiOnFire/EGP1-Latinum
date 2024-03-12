@@ -2,6 +2,7 @@ from cltk.tokenizers import LatinTokenizationProcess
 from cltk.languages.example_texts import get_example_text
 from cltk.core.data_types import Doc
 import json
+import os
 import numpy as np
 from pathlib import Path
 
@@ -15,6 +16,7 @@ def perseus_json_to_string(filepath):
     # later we can download it if it's not there
     # for now just grab De Bello Gallico, later seek through each folder and grab every .xml.json
     with open(filepath, 'r') as file:
+        print(filepath)
         data = json.load(file)
     # seperate/delimit chapters somehow?
     text = ""
@@ -31,13 +33,10 @@ def docstring_to_tokens(docstring):
     tokenized_doc = tokenizer_process.run(input_doc=Doc(raw=docstring))
     return tokenized_doc.tokens
 
-def tokenize_data(docstring, data_dir):
-    tokens = docstring_to_tokens(docstring)
-
 def make_encoder(tokenized_docs, data_dir):
-    all_tokens = np.array(set([token for doc in all_tokens for token in doc]))
+    all_tokens = list(set([token for doc in tokenized_docs for token in doc]))
     decoder = { index:token for index,token in enumerate(all_tokens) } 
-    encoder = { index:token for index,token in enumerate(all_tokens) } 
+    encoder = { token:index for index,token in enumerate(all_tokens) } 
 
     # let's use jsons to start for readability/validation but use pickle later for efficiency
     decoder_file = data_dir / "decoder.json"
@@ -48,12 +47,33 @@ def make_encoder(tokenized_docs, data_dir):
 
     with open(encoder_file, 'w') as handle:
         json.dump(encoder, handle)
-    
-def save_tokenized_doc()
-    token_ids = np.array(tokens, dtype=np.uint16)
-    token_ids_file = data_dir / "token_ids.bin"
-    token_ids.tofile(os.path.join(token_ids_file), "../data/tokens.bin")
 
+    return decoder, encoder
+    
+def get_json_docs(seek_files, data_dir):
+    extension = ".xml.json"
+    filepaths = []
+    for root, _, found_files in os.walk(data_dir):
+        for seek_file in seek_files: # these are the sought filenames
+            for found_file in found_files: # there are the files on disc
+                if seek_file + extension == found_file:
+                    filepaths.append(os.path.join(root, found_file))
+                    break
+    
+    return filepaths
+
+def encode_doc(tokenized_doc, encoder):
+    encoded_doc = []
+    for token in tokenized_doc:
+        encoded_doc.append(encoder[token])
+
+    return encoded_doc
+
+def save_encoded_doc(encoded_doc, name, data_dir):
+    token_ids = np.array(encoded_doc, dtype=np.uint16)
+    name = name + "encoded.bin"
+    token_ids_file = data_dir / name
+    token_ids.tofile(token_ids_file)
 
 def prep_data():
     # if there is no perseus folder, or it's empty
@@ -61,18 +81,19 @@ def prep_data():
     batch_size = 0
     data_dir = Path(__file__).parent.parent / "data"
 
-    # filepaths = ['../data/caes.bg_lat.xml.json']
-    filepaths = get_json_docs(data_dir)
+    filenames = ["caes.bg_lat"]
+    filepaths = get_json_docs(filenames, data_dir)
+    print(f"Filpeaths is {filepaths}")
     tokenized_docs = []
 
-    print("Entering loop")
     for filepath in filepaths:
+        print(f"the file path is {filepath}")
         docstring = perseus_json_to_string(filepath)
 
-        print(f"Tokenizing: {docstring}")
-        tokenized_docs.append(tokenize_data(docstring, data_dir))
+        tokenized_docs.append(docstring_to_tokens(docstring))
 
-    make_encoder(tokenized_docs, data_dir)
-    for doc in tokenized_docs:
-        save_tokenized_doc(doc)
+    _, encoder = make_encoder(tokenized_docs, data_dir)
+    for ind, name in enumerate(filenames):
+        encoded_doc = encode_doc(tokenized_docs[ind], encoder)
+        save_encoded_doc(encoded_doc, name, data_dir)
 
