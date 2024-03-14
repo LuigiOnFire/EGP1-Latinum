@@ -1,0 +1,98 @@
+From a top level perspective, we need to implement
+
+pred = model(X)
+loss = loss_fn(pred, y)
+
+and hence get the logits (from which we will derive the loss)
+
+Looking into model
+
+######
+GPT
+######
+
+------
+Constructor
+------
+
+In both, GPT is the top level object, which initialized all the other neural network modules and strings them together to make the full pass
+
+In both GPT takes in its construction a config object--this should be familiar from the homework
+
+Does a bunch of asserts to make sure the input configs are valid (i.e. just not None)
+
+Our transformer consits of:
+(how do we initialize our transformer? it is an nn.ModuleDict)
+token embeddings layer: nn.Embedding(number of tokens, embedding_dim)
+position embeddings layer: nn.Embedding(block length, embedding_dim)
+dropout layer nn.Dropout(dropout from config) (what's a good dropout value?)
+all our blocks, the number of blocks come from block_count in our config
+Layernorm(embedding_dim, optional bias from config)
+
+Outside of the transformer there is also lmhead(embedding_dim, token_number, bias=False)
+
+Here's a step that only nano has, described here https://paperswithcode.com/method/weight-tying
+self.transformer.wte.weight = self.lm_head.weight
+
+Layernorm is initalized in its constructor in nano (probably cleaner?) but with evertyhing else in _init_weights in mini
+
+------
+From Pretrained
+------
+
+both have a big "from pretrained" function, but that's for a huggingface checkpoint
+
+------
+Forward
+------
+
+the "forward" function
+gets the device from idx (input block) and sets its device to that
+gets batch and sequence length from idx's dimensions
+checks that that sequence length isn't too big
+uses torch.arrange() to make the positoin encoding (mini unsqueezes another dimension)
+feeds the tokens to the token embedding layer
+feeds the arrange result into the positoin embedding layer
+does dropout...
+then each block...
+then ln_f
+then gets logits from lm_head
+gets the loss from the cross entropy loss (which has to do some resizing)
+
+------
+Configure Optimizers
+------
+
+next configure_optimizers() function
+both versions have different ways of filtering out parameters to have different weight decays. mini is more explicit with more direct control and nano is more compact
+
+logits is the output of lm_head. Even though it's returned in the training script, it's not used.
+For my purpose we can treat logits as pred and do the loss function elswhere
+loss is just cross entropy between Y and logits
+
+------
+Generate
+------
+
+Generate function is for texting, takes a number of tokens to generate, clips the input idx if necessary, then uses various methods we've learned about to generate the tokens from logits
+
+nano has a get_num_params function that is used by an "estimate millflops" function and just in the constructor of GPT
+
+estimate_mfu is the function that esimates the milliflops, to compare with tha PALM paper it looks like
+
+------
+Crop Block size
+------
+
+nano has crop_block_size, which takes a block size and, after asserting that the input is smaller than the actual block size, clips the block size config stat and then updates the parameters as necessary
+
+nano's crop block size is only used in the training script
+
+Things other than GPT object
+
+mini implements its own NewGELU, nano just uses GELU (what's the difference?) The implementation seems the same as the documentation's definition--just use pytorche'same
+
+In CausalSelfAttention, nano has a term to support "flash attention" to make things faster but it requires pytorch 2.0 +
+This is in both the constructor and the forward function
+
+MLP is it's own function in nano--seems clean let's do that
