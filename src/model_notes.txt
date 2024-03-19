@@ -43,6 +43,15 @@ self.apply on a nn.module takes its every submodule, that's why we have the case
 
 Layernorm is initalized in its constructor in nano (probably cleaner?) but with evertyhing else in _init_weights in mini
 
+!!!Actually we do want to update layernorm in InitWeights, the nano version was a workaround for an old version of pytorch!!!
+
+Probably something like this:
+
+# TODO: This might not work, check for true and false biases!
+elif isinstance(module, nn.LayerNorm):
+    torch.nn.init.zeros_(module.bias) if module.bias
+    torch.nn.init.ones_(module.weight) 
+
 Linear models are intiialized using normal_(module.weight, mean = 0, std=0.2)
 then we check if the module.bias is not None, and if it isn't, we initialize the biases to 0 using torch.nn.init.zeros_(module.bias)
 
@@ -72,6 +81,24 @@ then ln_f
 then gets logits from lm_head
 gets the loss from the cross entropy loss (which has to do some resizing)
 
+Questions:
+
+How do we "check" that the input isn't too big for the model?
+Compare the second dimension of input from input.size() and make sure it's less than or equal self.config.block_size
+
+How do we forward with the Module Dict?
+for block in self.transformer.h:
+    x = block(x)
+
+What do we need to do the dropout?
+    x = self.transformer.drop(tok_emb + pos_emb)
+    Note that this adds the two vectors and THEN performs dropout
+
+logits is the output of lm_head. Even though it's returned in the training script, it's not used.
+For my purpose we can treat logits as pred and do the loss function elswhere
+loss is just cross entropy between Y and logits
+
+
 ------
 Configure Optimizers
 ------
@@ -79,9 +106,6 @@ Configure Optimizers
 next configure_optimizers() function
 both versions have different ways of filtering out parameters to have different weight decays. mini is more explicit with more direct control and nano is more compact
 
-logits is the output of lm_head. Even though it's returned in the training script, it's not used.
-For my purpose we can treat logits as pred and do the loss function elswhere
-loss is just cross entropy between Y and logits
 
 ------
 Generate
@@ -109,3 +133,46 @@ In CausalSelfAttention, nano has a term to support "flash attention" to make thi
 This is in both the constructor and the forward function
 
 MLP is it's own function in nano--seems clean let's do that
+
+######
+LayerNorm
+######
+
+Actually we won't imlement this--it's no longer needed since pytorch now allows us to write bias=false
+
+######
+CausalSelfAttention
+######
+
+This is a whole can of worms I'll do this later....
+
+######
+MLP (Multi-level perceptron)
+######
+
+The MLP is initialized from config, and contains:
+A linear layer(embedding_count, 4*embedding count, bias=config.bias)
+A gelu layer which is just nn.GELU()
+Another identical linear layer layer(embedding_count, 4*embedding count, bias=config.bias)
+a dropout layer which is just Dropout(config.dropout)
+
+Forward is simple, it just forwards each of the above
+
+x = self.module_name(x)
+
+######
+Block
+######
+
+The block has:
+a first layernorm(embed count, config.bias)
+Then we do causal self attention (using config)
+Then an identical layernorm(embed count, config.bias)
+Then put in MLP(config)
+For forwarding, we need to add and norm, in other words
+> Do the first layer norm
+> Add x and the attention layer of X
+> take the second layer norm of X
+> add x with MLP of x
+
+
