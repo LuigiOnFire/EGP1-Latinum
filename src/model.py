@@ -3,14 +3,38 @@ Based upon the nanoGPT and miniGPT implementatinos of Andrej Karpathy
 """
 from torch import nn
 
+class MultiLevelPerceptron(nn.Module):
+    def __init__(self, config):
+        # first feedforward layer
+        self.ff1 = nn.Linear(config.embedding_dim, 4*config.embedding_dim, bias=config.bias)
+        self.gelu = nn.GELU()
+        # second feedforward layer
+        self.ff2 = nn.Linear(config.embedding_dim, 4*config.embedding_dim, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.ff1(x)
+        x = self.gelu(x)
+        x = self.ff2(x)
+        x = self.dropout(x)
+
+        return x
+        
+
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        
+        self.layernorm1 = nn.Layernorm(config.embedding_dim,  config.bias)
+        self.causal_self_attn = CausalSelfAttention(config)
+        self.layernorm2 = nn.Layernorm(config.embedding_dim,  config.bias)
+        self.mlp = MultiLevelPerceptron(config)
 
-class LayerNorm(nn.Module):
-    def __init__(self, config):
-        super().__init__()
+    def forward(self, x):
+        x = self.layernorm1(x)
+        x = self.causal_self_attn(x) + x
+        x = self.layernorm(x)
+        x = self.mlp(x) + x
+
 
 class GPT(nn.Module):
     def __init__(self, config):
@@ -53,8 +77,13 @@ class GPT(nn.Module):
         out = self.tranformer.lyr_nrm(out)
 
         logit = self.lm_head(out)
+
+        return logit
         
-        loss = nn.CrossEntropyLoss_(logit, trgt)
+
+    def loss(self, logit, trgt):
+        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), trgt, ignore_index=-1)
+        return loss
 
     def configure_optimizers(self, optim_config):
         # This enables weight decay for certain parameters in our optimizer

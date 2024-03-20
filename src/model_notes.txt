@@ -110,6 +110,7 @@ both versions have different ways of filtering out parameters to have different 
 ------
 Generate
 ------
+WILL DO LATER
 
 Generate function is for texting, takes a number of tokens to generate, clips the input idx if necessary, then uses various methods we've learned about to generate the tokens from logits
 
@@ -144,7 +145,48 @@ Actually we won't imlement this--it's no longer needed since pytorch now allows 
 CausalSelfAttention
 ######
 
-This is a whole can of worms I'll do this later....
+------
+Constructor
+------
+
+FIRST we check that the number of embeddings is divisible by the head count
+assert that the remainder between the embedding dim and the head is 0
+
+We make a linear layer for attention Linear(embed_dim, 3 * embed_dim)
+Then a linear layer for projection Linear(embed_dim, embed_dim)
+
+Then an attentiion dropout
+nn.Dropout(config.dropout) (you could make this its own param if you want but meh)
+
+and a residual dropout
+nn.Dropout(config.dropout)
+
+Now make the following config variables instance variables
+
+number of heads
+embedding dim
+dropout rate
+
+We can check if oru pytorch has flash (much faster)
+self.flash_attn = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if not self.flash_attn:
+    # warn the user, tell them Pytorch 2.0 is better
+    self.register_buffer(
+        "bias", 
+        torch.trill(
+            torch.ones(
+                config.block_size, config. block_size)).view(
+                    1,1,config.block_size, config.block_size
+                )
+    )    
+
+------
+Forward
+------
+
+batch_size, sequence_length, embedding_dim = x.size()
+b, l, d, if we follow the stanford handout
+
 
 ######
 MLP (Multi-level perceptron)
