@@ -1,6 +1,7 @@
 """
 Based upon the nanoGPT and miniGPT implementatinos of Andrej Karpathy
 """
+import math
 from torch import nn
 
 class MultiLevelPerceptron(nn.Module):
@@ -10,7 +11,7 @@ class MultiLevelPerceptron(nn.Module):
         self.gelu = nn.GELU()
         # second feedforward layer
         self.ff2 = nn.Linear(config.embedding_dim, 4*config.embedding_dim, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(self, x):
         x = self.ff1(x)
@@ -19,7 +20,69 @@ class MultiLevelPerceptron(nn.Module):
         x = self.dropout(x)
 
         return x
-        
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        assert config.embedding_dim % config.attn_head_count == 0, f"Embedding dimension ({config.embedding_dim})must be divisible by number of attention heads ({config.attn_head_count})"
+        self.attn_lin1 = nn.Linear(config.embedding_dim, 3 * config.embedding_dim)
+        self.attn_lin2 = nn.Lienar(config.embedding_dim, self.embedding_dim)
+
+        self.attn_dropout = nn.Dropout(config.dropout_rate)
+
+        # if we feel like it later we can seperate this to use a different dropout rate
+        self.resid_dropout = nn.Dropout(config.dropout_rate)
+
+        self.attn_head_num = config.attn_head_num
+        self.embedding_dim = config.embedding_dim
+        self.dropout_rate = config.dropout_rate
+
+        self.flash_attn = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash_attn:
+            print("Flash attention is not available. Check that Pytorch 2.0 or above is being used.")
+            self.register_buffer("bias",
+                torch.trill(
+                   torch.ones(config.block-size, config.block_size)
+                   .view(1, 1, config.block_size, config.block_size)
+                )
+            )
+
+    def forward(self, x):
+        # b = batch size
+        # l = sequence length
+        # d = embedding dimension
+        b, l, d = x.size()
+
+        # not totally sure about these next three steps
+        qkv = self.attn_lin1(x)
+        # when do we use attn dropout?
+        q, k, v = qkv.split(self.embedding_dim, dim=2)
+        q = qview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
+        k = kview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
+        v = vview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
+
+        if self.flash_attn:
+            out = torch.nn.functional.scaled_dot_product_attention(
+                                                            q, k, v, \
+                                                            atten_mask = None, \
+                                                            dropout=self.dropout_rate if self.training else 0, \
+                                                            is_causal=true \
+                                                            )
+
+        else:
+            out = q @ k.transpose(-1, -2)
+            out = out * (1.0 / math.sqrt(k.size(-1)))
+            out = torch.masked_fill(mask(self.bias[:,:,:T,:T], float('-inf'))
+            out = nn.functional.softmax(out, dim=-1)
+            out = self.attn_dropout(out)
+            out = out @ v
+
+        out = out.transpose(1, 2).continguous().view(b, l, d)
+
+        out = self.attn_lin2(output)
+        out = self.resid_dropout(output)
+
+        return output
 
 class Block(nn.Module):
     def __init__(self, config):
@@ -44,7 +107,7 @@ class GPT(nn.Module):
         assert config.token_count is not None
         assert config.embedding_dim is not None
         assert config.block_length is not None
-        assert config.dropout is not None
+        assert config.dropout_rate is not None
         assert config.block_count is not None
         
         self.config = config
@@ -53,7 +116,7 @@ class GPT(nn.Module):
             dict(
                 tkn_embd = nn.Embedding(config.token_count, config.embedding_dim),
                 pos_embd = nn.Embedding(config.block_length, config.embedding_dim),
-                dropout = nn.Dropout(config.dropout),
+                dropout = nn.Dropout(config.dropout_rate),
                 blocks = nn.ModuleList([Block(config) for _ in range(config.block_count)),
                 lyr_nrm = nn.LayerNorm(config.embedding_dim, bias=config.bias)
             )

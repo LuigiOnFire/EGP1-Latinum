@@ -187,6 +187,30 @@ Forward
 batch_size, sequence_length, embedding_dim = x.size()
 b, l, d, if we follow the stanford handout
 
+extract q, k, and v from c_attn by splitting c_attn into groups of size embed_dim along dimension 2
+reshape each of the above using view into something of size(b, l, d / head_count)
+then transpose dimensions 1 and 2 of each of those
+
+next, if we have flash enabled (defined in constructor), or job is easy
+We can just call 
+torch.nn.functional.scaled_dot_product_attention(q, k, v,
+    set attn_mask to None
+    set dropout to self.dropout if self has training defined, otherwise set it to 0,
+    set is_causal to true
+)
+
+if NOT, then we have to actually implement the self attention equations
+first matrix multiply q by k (transposed last and second to last dimensions)
+then, divide the result by sqrt(k.size(-1)) (this is analogous to d/h in our equation)
+Then, get a submatrix of the bias mask matrix to make matrix that will max out future elements to -inf
+get the submatrix using self.bias[:,:,:T,:T]
+Then, take the softmax of att along the last dimension
+finaly, matrix multiply our result with v (the last step of the equation)
+
+Then take your output (for either of the above branches) and transpose elements 1, 2, apply contiguous (to make it more efficient in memory) and view it back into B, T, C shape
+
+finally, put y through the second of our two linear layers and the apply the second dropout
+now we can return y!
 
 ######
 MLP (Multi-level perceptron)
