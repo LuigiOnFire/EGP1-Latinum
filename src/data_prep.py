@@ -33,14 +33,14 @@ def docstring_to_tokens(docstring):
     tokenized_doc = tokenizer_process.run(input_doc=Doc(raw=docstring))
     return tokenized_doc.tokens
 
-def make_encoder(tokenized_docs, data_dir):
+def make_encoder(tokenized_docs, token_data_dir):
     all_tokens = list(set([token for doc in tokenized_docs for token in doc]))
     decoder = { index:token for index,token in enumerate(all_tokens) } 
     encoder = { token:index for index,token in enumerate(all_tokens) } 
 
     # let's use jsons to start for readability/validation but use pickle later for efficiency
-    decoder_file = data_dir / "decoder.json"
-    encoder_file = data_dir / "encoder.json"
+    decoder_file = token_data_dir / "decoder.json"
+    encoder_file = token_data_dir / "encoder.json"
 
     with open(decoder_file, 'w') as handle:
         json.dump(decoder, handle)
@@ -50,10 +50,10 @@ def make_encoder(tokenized_docs, data_dir):
 
     return decoder, encoder
     
-def get_json_docs(seek_files, data_dir):
+def get_json_docs(seek_files, source_data_dir):
     extension = ".xml.json"
     filepaths = []
-    for root, _, found_files in os.walk(data_dir):
+    for root, _, found_files in os.walk(source_data_dir):
         for seek_file in seek_files: # these are the sought filenames
             for found_file in found_files: # there are the files on disc
                 if seek_file + extension == found_file:
@@ -69,20 +69,24 @@ def encode_doc(tokenized_doc, encoder):
 
     return encoded_doc
 
-def save_encoded_doc(encoded_doc, name, data_dir):
+def save_encoded_doc(encoded_doc, name, token_data_dir):
     token_ids = np.array(encoded_doc, dtype=np.uint16)
     name = name + "encoded.bin"
-    token_ids_file = data_dir / name
+    token_ids_file = token_data_dir / name
     token_ids.tofile(token_ids_file)
 
 def prep_data():
+    """
+    This is the top level function of this file
+    """
     # if there is no perseus folder, or it's empty
     # download_perseus_data()
     batch_size = 0
-    data_dir = Path(__file__).parent.parent / "data"
+    source_data_dir = Path(__file__).parent.parent / "data"
+    token_data_dir = source_data_dir / "token_data"
 
     filenames = ["caes.bg_lat"]
-    filepaths = get_json_docs(filenames, data_dir)
+    filepaths = get_json_docs(filenames, source_data_dir)
     print(f"Filpeaths is {filepaths}")
     tokenized_docs = []
 
@@ -92,8 +96,8 @@ def prep_data():
 
         tokenized_docs.append(docstring_to_tokens(docstring))
 
-    _, encoder = make_encoder(tokenized_docs, data_dir)
+    _, encoder = make_encoder(tokenized_docs, token_data_dir)
     for ind, name in enumerate(filenames):
         encoded_doc = encode_doc(tokenized_docs[ind], encoder)
-        save_encoded_doc(encoded_doc, name, data_dir)
+        save_encoded_doc(encoded_doc, name, token_data_dir)
 

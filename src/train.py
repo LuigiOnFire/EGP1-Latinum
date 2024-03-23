@@ -1,3 +1,4 @@
+import data_load
 import data_prep
 import model
 import torch
@@ -38,10 +39,13 @@ if __name__ == "__main__":
     
     print(f"Using {device} as the device")
 
-    # run data_prep
+    # run data_prep if it hasn't already #TODO: make an argument for this
     data_prep.prep_data()
+    dataset = data_load.TokenizedLatinDataset()
+    batch_sampler = data_load.BatchSampler(dataset, batch_size)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_sampler=batch_sampler)
 
-    #setup our dataloader
+    #setup our 
 
 #     model = NeuralNetwork().to(device)
 #     print(model)
