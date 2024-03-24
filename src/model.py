@@ -42,7 +42,7 @@ class CausalSelfAttention(nn.Module):
             print("Flash attention is not available. Check that Pytorch 2.0 or above is being used.")
             self.register_buffer("bias",
                 torch.trill(
-                   torch.ones(config.block-size, config.block_size)
+                   torch.ones(config.block_size, config.block_size)
                    .view(1, 1, config.block_size, config.block_size)
                 )
             )
