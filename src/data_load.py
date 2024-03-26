@@ -3,9 +3,10 @@ from torch.utils.data import Dataset
 
 def TokenizedLatinDataset(Dataset):
 
-    def __init__(self):
-        self.token_data_dir = Path(__file__).parent.parent / "data" / "token_data"
+    def __init__(self, token_data_dir, block_size):
+        self.block_size = block_size
         self.bin_files = []
+        self.data_len = None
         encode_suffix = "encoded.bin"
         for file in os.listdir(self.token_data_dir)
            if file.endswith(encode_suffix):
@@ -13,18 +14,27 @@ def TokenizedLatinDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.bin_files)
+        if self.data_len != None:
+            return self.data_len
+        else:
+            tot_len = 0
+            for bin_file in self.bin_files:
+                with open(bin_file, 'r') as f:
+                    token_data = np.memmap(bin_file), dtype=np.uint16, mode='r')
+                    tot_len += len(token_data) - self.block_size
+
+            return tot_len
 
     def __get_item__(self, idx):
-        bin_file = self.bin_files[idx]
-        with open(bin_file, 'r') as f:
-            token_data = np.memmap(bin_file), dtype=np.uint16, mode-'r')
+        running_len = 0
+        for bin_file in self.bin_files:
+            with open(bin_file, 'r') as f:
+                token_data = np.memmap(bin_file), dtype=np.uint16, mode='r')
+                effective_len = len(token_data) - self.block_size
+                if idx < running_len + effective_len:
+                    data_start = idx - running_len 
+                    x = token_data[data_start:data_start + self.block_size] 
+                    y = token_data[data_start + self.block_size]
+                    return x, y
 
-def BatchSampler():
-    def __init__(self, dataset, batch_size):
-        self.dataset = dataset
-        self.batch_size = batch_size
-
-    def __iter__(self):
-        current_bin_file = None
-        current_indices = 
+                running_len += effective_len

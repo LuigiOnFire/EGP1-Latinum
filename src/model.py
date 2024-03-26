@@ -11,7 +11,7 @@ class MultiLevelPerceptron(nn.Module):
         self.gelu = nn.GELU()
         # second feedforward layer
         self.ff2 = nn.Linear(config.embedding_dim, 4*config.embedding_dim, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout_rate)
+        self.dropout = nn.Dropout(config.resid_dropout)
 
     def forward(self, x):
         x = self.ff1(x)
@@ -24,26 +24,22 @@ class MultiLevelPerceptron(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        assert config.embedding_dim % config.attn_head_count == 0, f"Embedding dimension ({config.embedding_dim})must be divisible by number of attention heads ({config.attn_head_count})"
+        assert config.embedding_dim % config.attn_head_count == 0, f"Embedding dimension ({config.embedding_dim}) must be divisible by number of attention heads ({config.attn_head_count})"
         self.attn_lin1 = nn.Linear(config.embedding_dim, 3 * config.embedding_dim)
         self.attn_lin2 = nn.Lienar(config.embedding_dim, self.embedding_dim)
 
-        self.attn_dropout = nn.Dropout(config.dropout_rate)
-
-        # if we feel like it later we can seperate this to use a different dropout rate
-        self.resid_dropout = nn.Dropout(config.dropout_rate)
+        self.attn_dropout = nn.Dropout(config.attn_dropout)
+        self.resid_dropout = nn.Dropout(config.resid_dropout)
 
         self.attn_head_num = config.attn_head_num
         self.embedding_dim = config.embedding_dim
-        self.dropout_rate = config.dropout_rate
-
         self.flash_attn = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash_attn:
             print("Flash attention is not available. Check that Pytorch 2.0 or above is being used.")
             self.register_buffer("bias",
                 torch.trill(
-                   torch.ones(config.block_size, config.block_size)
-                   .view(1, 1, config.block_size, config.block_size)
+                   torch.ones(config.block_length, config.block_length)
+                   .view(1, 1, config.block_length, config.block_length)
                 )
             )
 
@@ -53,9 +49,7 @@ class CausalSelfAttention(nn.Module):
         # d = embedding dimension
         b, l, d = x.size()
 
-        # not totally sure about these next three steps
         qkv = self.attn_lin1(x)
-        # when do we use attn dropout?
         q, k, v = qkv.split(self.embedding_dim, dim=2)
         q = qview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
         k = kview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
@@ -65,7 +59,7 @@ class CausalSelfAttention(nn.Module):
             out = torch.nn.functional.scaled_dot_product_attention(
                                                             q, k, v, \
                                                             atten_mask = None, \
-                                                            dropout=self.dropout_rate if self.training else 0, \
+                                                            dropout=self.attn_dropout if self.training else 0, \
                                                             is_causal=true \
                                                             )
 
@@ -107,8 +101,8 @@ class GPT(nn.Module):
         assert config.token_count is not None
         assert config.embedding_dim is not None
         assert config.block_length is not None
-        assert config.dropout_rate is not None
-        assert config.block_count is not None
+        assert config.embed_dropout is not None
+        assert config.layer_count is not None
         
         self.config = config
 
@@ -116,17 +110,40 @@ class GPT(nn.Module):
             dict(
                 tkn_embd = nn.Embedding(config.token_count, config.embedding_dim),
                 pos_embd = nn.Embedding(config.block_length, config.embedding_dim),
-                dropout = nn.Dropout(config.dropout_rate),
-                blocks = nn.ModuleList([Block(config) for _ in range(config.block_count)),
+                dropout = nn.Dropout(config.embed_dropout),
+                blocks = nn.ModuleList([Block(config) for _ in range(config.layer_count)),
                 lyr_nrm = nn.LayerNorm(config.embedding_dim, bias=config.bias)
             )
         )
         self.lm_head = nn.Linear(config.embedding_dim, config.token_count, bias=False)
 
+        self.apply(self._init_weights)
+        
+        for name, param in self.named_parameters():
+            if name.endswith('c_proj.weight'):
+                torch.nn.init.normal_(param, mean=0.0, std=0.02/math.sqrt(2 * config.layer_count))
+
+        param_count = sum(param.numel for param in self.transformer.parameters())
+        print(f"This instantation of EGP has {param_count} parameters.")
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+        elif isinstance(module, nn.LayerNorm):
+            torch.nn.init.zeros_(module.bias)
+            torch.nn.init.ones_(module.weight)
+
+
     def forward(self, input_block, trgt_tkn):
         device = input_block.device()
         b, h = input_block.dims()
-        assert h < self.config.block_size, f"Input token list too long: we received {h} and our maximum is {self.config.block_size."
+        assert h < self.config.block_length, f"Input token list too long: we received {h} and our maximum is {self.config.block_length."
         pos_seq = torch.arrange(0, h)
 
         # transformer forward here
@@ -147,6 +164,8 @@ class GPT(nn.Module):
     def loss(self, logit, trgt):
         loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), trgt, ignore_index=-1)
         return loss
+
+    def 
 
     def configure_optimizers(self, optim_config):
         # This enables weight decay for certain parameters in our optimizer
@@ -175,7 +194,7 @@ class GPT(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=Tru) if use_fused else dict()
-        optimizer = torch.optim.AdamW(config.optim_groups,
+        optimizer = torch.optim.AdamW(optim_groups,
                                       lr=config.learning_rate, 
                                       betas=config.betas, 
                                       **extra_args)
