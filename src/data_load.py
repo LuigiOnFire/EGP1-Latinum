@@ -1,16 +1,19 @@
+import numpy as np
 import os
+import torch
+
 from torch.utils.data import Dataset
 
-def TokenizedLatinDataset(Dataset):
-
+class TokenizedLatinDataset(Dataset):
     def __init__(self, token_data_dir, block_size):
+        self.token_data_dir = token_data_dir
         self.block_size = block_size
         self.bin_files = []
         self.data_len = None
         encode_suffix = "encoded.bin"
-        for file in os.listdir(self.token_data_dir)
-           if file.endswith(encode_suffix):
-               self.bin_files.append(self.token_data_dir, file))
+        for file in os.listdir(self.token_data_dir):
+            if file.endswith(encode_suffix):
+                self.bin_files.append(self.token_data_dir / file)
 
 
     def __len__(self):
@@ -20,21 +23,21 @@ def TokenizedLatinDataset(Dataset):
             tot_len = 0
             for bin_file in self.bin_files:
                 with open(bin_file, 'r') as f:
-                    token_data = np.memmap(bin_file), dtype=np.uint16, mode='r')
+                    token_data = np.memmap(bin_file, dtype=np.int64)
                     tot_len += len(token_data) - self.block_size
 
             return tot_len
 
-    def __get_item__(self, idx):
+    def __getitem__(self, idx):
         running_len = 0
         for bin_file in self.bin_files:
             with open(bin_file, 'r') as f:
-                token_data = np.memmap(bin_file), dtype=np.uint16, mode='r')
+                token_data = np.memmap(bin_file, dtype=np.int64)
                 effective_len = len(token_data) - self.block_size
                 if idx < running_len + effective_len:
-                    data_start = idx - running_len 
-                    x = token_data[data_start:data_start + self.block_size] 
-                    y = token_data[data_start + self.block_size]
+                    data_start = idx - running_len
+                    x = torch.from_numpy(token_data[data_start:data_start + self.block_size])
+                    y = torch.from_numpy(token_data[data_start + 1:data_start + self.block_size + 1])
                     return x, y
 
                 running_len += effective_len

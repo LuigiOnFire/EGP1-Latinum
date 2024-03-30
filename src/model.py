@@ -1,17 +1,19 @@
 """
 Based upon the nanoGPT and miniGPT implementatinos of Andrej Karpathy
 """
+import inspect
 import math
-from torch import nn
+import torch
 
-class MultiLevelPerceptron(nn.Module):
+class MultiLevelPerceptron(torch.nn.Module):
     def __init__(self, config):
+        super().__init__()
         # first feedforward layer
-        self.ff1 = nn.Linear(config.embedding_dim, 4*config.embedding_dim, bias=config.bias)
-        self.gelu = nn.GELU()
+        self.ff1 = torch.nn.Linear(config.embedding_dim, 4 * config.embedding_dim, bias=config.bias)
+        self.gelu = torch.nn.GELU()
         # second feedforward layer
-        self.ff2 = nn.Linear(config.embedding_dim, 4*config.embedding_dim, bias=config.bias)
-        self.dropout = nn.Dropout(config.resid_dropout)
+        self.ff2 = torch.nn.Linear(4 * config.embedding_dim, config.embedding_dim, bias=config.bias)
+        self.dropout = torch.nn.Dropout(config.resid_dropout)
 
     def forward(self, x):
         x = self.ff1(x)
@@ -21,23 +23,24 @@ class MultiLevelPerceptron(nn.Module):
 
         return x
 
-class CausalSelfAttention(nn.Module):
+class CausalSelfAttention(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.embedding_dim % config.attn_head_count == 0, f"Embedding dimension ({config.embedding_dim}) must be divisible by number of attention heads ({config.attn_head_count})"
-        self.attn_lin1 = nn.Linear(config.embedding_dim, 3 * config.embedding_dim)
-        self.attn_lin2 = nn.Lienar(config.embedding_dim, self.embedding_dim)
+        self.attn_lin1 = torch.nn.Linear(config.embedding_dim, 3 * config.embedding_dim)
+        self.attn_lin2 = torch.nn.Linear(config.embedding_dim, config.embedding_dim)
 
-        self.attn_dropout = nn.Dropout(config.attn_dropout)
-        self.resid_dropout = nn.Dropout(config.resid_dropout)
+        self.attn_dropout = torch.nn.Dropout(config.attn_dropout)
+        self.resid_dropout = torch.nn.Dropout(config.resid_dropout)
+        self.attn_dropout_factor = config.attn_dropout
 
-        self.attn_head_num = config.attn_head_num
+        self.attn_head_count = config.attn_head_count
         self.embedding_dim = config.embedding_dim
         self.flash_attn = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash_attn:
             print("Flash attention is not available. Check that Pytorch 2.0 or above is being used.")
             self.register_buffer("bias",
-                torch.trill(
+                torch.tril(
                    torch.ones(config.block_length, config.block_length)
                    .view(1, 1, config.block_length, config.block_length)
                 )
@@ -51,49 +54,51 @@ class CausalSelfAttention(nn.Module):
 
         qkv = self.attn_lin1(x)
         q, k, v = qkv.split(self.embedding_dim, dim=2)
-        q = qview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
-        k = kview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
-        v = vview(b, l, self.attn_head_num, d // self.attn_head_num).transpose(1, 2)
+        q = q.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
+        k = k.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
+        v = v.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
 
         if self.flash_attn:
             out = torch.nn.functional.scaled_dot_product_attention(
                                                             q, k, v, \
-                                                            atten_mask = None, \
-                                                            dropout=self.attn_dropout if self.training else 0, \
-                                                            is_causal=true \
+                                                            attn_mask = None, \
+                                                            dropout_p=self.attn_dropout_factor if self.training else 0, \
+                                                            is_causal=True \
                                                             )
 
         else:
             out = q @ k.transpose(-1, -2)
             out = out * (1.0 / math.sqrt(k.size(-1)))
-            out = torch.masked_fill(mask(self.bias[:,:,:T,:T], float('-inf'))
-            out = nn.functional.softmax(out, dim=-1)
+            out = torch.masked_fill(self.bias[:,:,:l,:l], float('-inf'))
+            out = torch.nn.functional.softmax(out, dim=-1)
             out = self.attn_dropout(out)
             out = out @ v
 
-        out = out.transpose(1, 2).continguous().view(b, l, d)
+        out = out.transpose(1, 2).contiguous().view(b, l, d)
 
-        out = self.attn_lin2(output)
-        out = self.resid_dropout(output)
+        out = self.attn_lin2(out)
+        out = self.resid_dropout(out)
 
-        return output
+        return out
 
-class Block(nn.Module):
+class Block(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.layernorm1 = nn.Layernorm(config.embedding_dim,  config.bias)
+        self.layernorm1 = torch.nn.LayerNorm(config.embedding_dim,  bias=config.bias)
         self.causal_self_attn = CausalSelfAttention(config)
-        self.layernorm2 = nn.Layernorm(config.embedding_dim,  config.bias)
+        self.layernorm2 = torch.nn.LayerNorm(config.embedding_dim,  bias=config.bias)
         self.mlp = MultiLevelPerceptron(config)
 
     def forward(self, x):
         x = self.layernorm1(x)
         x = self.causal_self_attn(x) + x
-        x = self.layernorm(x)
+        x = self.layernorm2(x)
         x = self.mlp(x) + x
 
+        return x
 
-class GPT(nn.Module):
+
+class GPT(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
 
@@ -106,68 +111,69 @@ class GPT(nn.Module):
         
         self.config = config
 
-        self.transformer = nn.ModuleDict(
+        self.transformer = torch.nn.ModuleDict(
             dict(
-                tkn_embd = nn.Embedding(config.token_count, config.embedding_dim),
-                pos_embd = nn.Embedding(config.block_length, config.embedding_dim),
-                dropout = nn.Dropout(config.embed_dropout),
-                blocks = nn.ModuleList([Block(config) for _ in range(config.layer_count)),
-                lyr_nrm = nn.LayerNorm(config.embedding_dim, bias=config.bias)
+                tkn_embd = torch.nn.Embedding(config.token_count, config.embedding_dim),
+                pos_embd = torch.nn.Embedding(config.block_length, config.embedding_dim),
+                dropout = torch.nn.Dropout(config.embed_dropout),
+                blocks = torch.nn.ModuleList([Block(config) for _ in range(config.layer_count)]),
+                lyr_nrm = torch.nn.LayerNorm(config.embedding_dim, bias=config.bias)
             )
         )
-        self.lm_head = nn.Linear(config.embedding_dim, config.token_count, bias=False)
+        self.lm_head = torch.nn.Linear(config.embedding_dim, config.token_count, bias=False)
 
         self.apply(self._init_weights)
-        
+
         for name, param in self.named_parameters():
             if name.endswith('c_proj.weight'):
                 torch.nn.init.normal_(param, mean=0.0, std=0.02/math.sqrt(2 * config.layer_count))
 
-        param_count = sum(param.numel for param in self.transformer.parameters())
+        param_count = sum(param.numel() for param in self.transformer.parameters())
         print(f"This instantation of EGP has {param_count} parameters.")
 
     def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
+        if isinstance(module, torch.nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
 
-        elif isinstance(module, nn.Embedding):
+        elif isinstance(module, torch.nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-        elif isinstance(module, nn.LayerNorm):
-            torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, torch.nn.LayerNorm):
             torch.nn.init.ones_(module.weight)
+            if module.bias is not None: # This seems bugged... may need to refactor if we want a LayerNorm with bias
+                torch.nn.init.zeros_(module.bias)
 
 
-    def forward(self, input_block, trgt_tkn):
-        device = input_block.device()
-        b, h = input_block.dims()
-        assert h < self.config.block_length, f"Input token list too long: we received {h} and our maximum is {self.config.block_length."
-        pos_seq = torch.arrange(0, h)
+    def forward(self, input_block):
+        device = input_block.device
+        b, h = input_block.size()
+        assert h <= self.config.block_length, f"Input token list too long: we received {h} and our maximum is {self.config.block_length}."
+        pos_seq = torch.arange(0, h, dtype=torch.long, device = device)
 
         # transformer forward here
         embds_t = self.transformer.tkn_embd(input_block)
         embds_p = self.transformer.pos_embd(pos_seq)
         embds_final = embds_t + embds_p
-        out = dropout(embds_final) 
+        out = self.transformer.dropout(embds_final)
         for block in self.transformer.blocks:
             out = block(out)
 
-        out = self.tranformer.lyr_nrm(out)
+        out = self.transformer.lyr_nrm(out)
 
         logit = self.lm_head(out)
 
         return logit
         
 
-    def loss(self, logit, trgt):
-        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), trgt, ignore_index=-1)
+    def loss(self, logits, trgts):
+        # I'd like to understand the dimensionality of this step better
+        loss = torch.nn.functional.cross_entropy(
+            logits.view(-1, logits.size(-1)), trgts.view(-1), ignore_index=-1)
         return loss
 
-    def 
-
-    def configure_optimizers(self, optim_config):
+    def configure_optimizers(self, model_config, device_type):
         # This enables weight decay for certain parameters in our optimizer
         # See: https://towardsdatascience.com/this-thing-called-weight-decay-a7cd4bcfccab
 
@@ -177,26 +183,29 @@ class GPT(nn.Module):
 
         # Stuff all our remaining parameters into two categories based how many dimensions they have
         decay_params = [param for name, param in param_dict.items() if param.dim() >= 2]
-        nodecay_params = [param, name, param, in param_dict.items() if param.dim() < 2]
+        nodecay_params = [param for name, param in param_dict.items() if param.dim() < 2]
 
         optim_groups = [
-            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': decay_params, 'weight_decay': model_config.weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
+
+        for name, param in self.named_parameters():
+            print(f"{name} is on {param.device}")
 
         num_decay_params = sum(param.numel() for param in decay_params)
         num_nodecay_params = sum(param.numel() for param in nodecay_params)
         print(f"We enable decay for {len(decay_params)} tensors.")
-        print(f"These tensors with decay have {num_decay_params:.} parameters.")
+        print(f"These tensors with decay have {num_decay_params} parameters.")
         print(f"We disable decay for {len(nodecay_params)} tensors.")
-        print(f"These tensors without decay have {num_nodecay_params:.} parameters.")
+        print(f"These tensors without decay have {num_nodecay_params} parameters.")
 
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
-        extra_args = dict(fused=Tru) if use_fused else dict()
+        extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups,
-                                      lr=config.learning_rate, 
-                                      betas=config.betas, 
+                                      lr=model_config.learning_rate,
+                                      betas=model_config.betas,
                                       **extra_args)
         print("Is our AdamW fused? {use_fused}")
 

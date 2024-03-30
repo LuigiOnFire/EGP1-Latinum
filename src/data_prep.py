@@ -70,7 +70,7 @@ def encode_doc(tokenized_doc, encoder):
     return encoded_doc
 
 def save_encoded_doc(encoded_doc, name, token_data_dir):
-    token_ids = np.array(encoded_doc, dtype=np.uint16)
+    token_ids = np.array(encoded_doc, dtype=np.int64)
     name = name + "encoded.bin"
     token_ids_file = token_data_dir / name
     token_ids.tofile(token_ids_file)
@@ -81,9 +81,13 @@ def prep_data():
     """
     # if there is no perseus folder, or it's empty
     # download_perseus_data()
+    print("DEBUG: We're in dataprep")
     batch_size = 0
     source_data_dir = Path(__file__).parent.parent / "data"
     token_data_dir = source_data_dir / "token_data"
+
+    # Make the directory if it doesn't exist yet
+    os.makedirs(token_data_dir, exist_ok=True)
 
     filenames = ["caes.bg_lat"]
     filepaths = get_json_docs(filenames, source_data_dir)
