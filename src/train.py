@@ -70,6 +70,31 @@ def train(dataloader, model, optimizer, device):
     torch.save(model.state_dict(), f"model_{datetime}{now_str}.pth")
     print("Saved PyTorch Model State to model.pth")
 
+def test(model):
+    # load all the sentences from the file
+    script_dir = Path(__file__).resolve().parent
+    file_in = script_dir / "test_sents.txt"
+    with open(file_in, 'r', encoding='utf-8') as fi:
+        sents_in = fi.readlines()
+
+    # encode input sentences
+    # SUGGESTION: make a tokenize_latin_sentence and move to util?
+    sents_in_enc = []
+    for sent_in in sents_in:
+        tokenizer_process = LatinTokenizationProcess()
+        tokenized_doc = tokenizer_process.run(input_doc=Doc(raw=docstring))
+        return tokenized_doc.tokens
+
+    # reshape/pad as needed
+    
+
+    # load them all into model
+    sents_out = []
+    for sent_in in sents_in:
+        sents_out.append(model(sent_in))
+
+    # write all the out sentences to a dated output file
+
 if __name__ == "__main__":
     print("Preparing data...")
     data_prep.prep_data()
