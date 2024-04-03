@@ -1,10 +1,13 @@
+import json
+import os
+
 from cltk.tokenizers import LatinTokenizationProcess
 from cltk.languages.example_texts import get_example_text
 from cltk.core.data_types import Doc
-import json
-import os
 import numpy as np
 from pathlib import Path
+from utils import PAD_TOKEN, PAD_INDEX
+
 
 
 def download_perseus_data():
@@ -35,6 +38,7 @@ def docstring_to_tokens(docstring):
 
 def make_encoder(tokenized_docs, token_data_dir):
     all_tokens = list(set([token for doc in tokenized_docs for token in doc]))
+    all_tokens.insert(PAD_INDEX, PAD_TOKEN)
     decoder = { index:token for index,token in enumerate(all_tokens) } 
     encoder = { token:index for index,token in enumerate(all_tokens) } 
 
@@ -81,7 +85,6 @@ def prep_data():
     """
     # if there is no perseus folder, or it's empty
     # download_perseus_data()
-    print("DEBUG: We're in dataprep")
     batch_size = 0
     source_data_dir = Path(__file__).parent.parent / "data"
     token_data_dir = source_data_dir / "token_data"

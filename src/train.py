@@ -2,11 +2,13 @@ import datetime
 import json
 from pathlib import Path
 
+from cltk.tokenizers import LatinTokenizationProcess
+from cltk.core.data_types import Doc
+
 import data_load
 import data_prep
 import model
 import torch
-# import test
 
 
 class ConfigNode():
@@ -70,7 +72,10 @@ def train(dataloader, model, optimizer, device):
     torch.save(model.state_dict(), f"model_{datetime}{now_str}.pth")
     print("Saved PyTorch Model State to model.pth")
 
-def test(model):
+def test(model, new_tokens):
+    # set the model in eval mode
+    model.eval()
+
     # load all the sentences from the file
     script_dir = Path(__file__).resolve().parent
     file_in = script_dir / "test_sents.txt"
@@ -82,11 +87,12 @@ def test(model):
     sents_in_enc = []
     for sent_in in sents_in:
         tokenizer_process = LatinTokenizationProcess()
-        tokenized_doc = tokenizer_process.run(input_doc=Doc(raw=docstring))
+        tokenized_doc = tokenizer_process.run(input_doc=Doc(raw=sent_in))
         return tokenized_doc.tokens
 
     # reshape/pad as needed
-    
+    for idx, sent_in in enumerate(sents_in):
+        sents_in[idx] = sent_in if sent_in.size(1) <= config_model.block_length else 
 
     # load them all into model
     sents_out = []
@@ -124,7 +130,6 @@ if __name__ == "__main__":
     
     dataset = data_load.TokenizedLatinDataset(
         config_train.token_data_dir, config_model.block_length)
-    # batch_sampler = data_load.BatchSampler(dataset, config_train.batch_size)
     dataloader = torch.utils.data.DataLoader(
         dataset, 
         batch_size=config_train.batch_size, 
