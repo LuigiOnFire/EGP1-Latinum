@@ -4,6 +4,7 @@ Based upon the nanoGPT and miniGPT implementatinos of Andrej Karpathy
 import inspect
 import math
 import torch
+import torch.autograd.profiler as profiler
 
 class MultiLevelPerceptron(torch.nn.Module):
     def __init__(self, config):
@@ -36,7 +37,10 @@ class CausalSelfAttention(torch.nn.Module):
 
         self.attn_head_count = config.attn_head_count
         self.embedding_dim = config.embedding_dim
-        self.flash_attn = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+
+        # turns out flash attention not enabled on windows yet, unlucky        
+        self.flash_attn = hasattr(torch.nn.functional, 'scaled_dot_product_attention')        
+        # self.flash_attn = False
         if not self.flash_attn:
             print("Flash attention is not available. Check that Pytorch 2.0 or above is being used.")
             self.register_buffer("bias",
@@ -50,36 +54,43 @@ class CausalSelfAttention(torch.nn.Module):
         # b = batch size
         # l = sequence length
         # d = embedding dimension
-        b, l, d = x.size()
+        with profiler.record_function("TENSOR SETUP"):
 
-        qkv = self.attn_lin1(x)
-        q, k, v = qkv.split(self.embedding_dim, dim=2)
-        q = q.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
-        k = k.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
-        v = v.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
+            b, l, d = x.size()
+
+            qkv = self.attn_lin1(x)
+            q, k, v = qkv.split(self.embedding_dim, dim=2)
+            q = q.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
+            k = k.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)
+            v = v.view(b, l, self.attn_head_count, d // self.attn_head_count).transpose(1, 2)                        
+
 
         if self.flash_attn:
-            out = torch.nn.functional.scaled_dot_product_attention(
-                                                            q, k, v, \
-                                                            attn_mask = None, \
-                                                            dropout_p=self.attn_dropout_factor if self.training else 0, \
-                                                            is_causal=True \
-                                                            )
+            with profiler.record_function("FLASH ATTENTION"):
+                out = torch.nn.functional.scaled_dot_product_attention(
+                                                                q, k, v, \
+                                                                attn_mask = None, \
+                                                                dropout_p=self.attn_dropout_factor if self.training else 0, \
+                                                                is_causal=True \
+                                                                )
 
         else:
-            out = q @ k.transpose(-1, -2)
-            out = out * (1.0 / math.sqrt(k.size(-1)))
-            out = torch.masked_fill(self.bias[:,:,:l,:l], float('-inf'))
-            out = torch.nn.functional.softmax(out, dim=-1)
-            out = self.attn_dropout(out)
-            out = out @ v
+            with profiler.record_function("NOT FLASH ATTENTION"):
+                out = q @ k.transpose(-1, -2)
+                out = out * (1.0 / math.sqrt(k.size(-1)))
+                out = out.masked_fill(self.bias[:,:,:l,:l] == 0, float('-inf'))
+                out = torch.nn.functional.softmax(out, dim=-1)
+                out = self.attn_dropout(out)
+                out = out @ v
 
-        out = out.transpose(1, 2).contiguous().view(b, l, d)
+        with profiler.record_function("CLEANUP"):
 
-        out = self.attn_lin2(out)
-        out = self.resid_dropout(out)
+            out = out.transpose(1, 2).contiguous().view(b, l, d)
 
-        return out
+            out = self.attn_lin2(out)
+            out = self.resid_dropout(out)
+
+            return out
 
 class Block(torch.nn.Module):
     def __init__(self, config):
@@ -108,7 +119,7 @@ class GPT(torch.nn.Module):
         assert config.block_length is not None
         assert config.embed_dropout is not None
         assert config.layer_count is not None
-        
+
         self.config = config
 
         self.transformer = torch.nn.ModuleDict(
@@ -145,8 +156,7 @@ class GPT(torch.nn.Module):
             if module.bias is not None: # This seems bugged... may need to refactor if we want a LayerNorm with bias
                 torch.nn.init.zeros_(module.bias)
 
-
-    def forward(self, input_block):
+    def forward(self, input_block, trgts=None):
         device = input_block.device
         b, h = input_block.size()
         assert h <= self.config.block_length, f"Input token list too long: we received {h} and our maximum is {self.config.block_length}."
@@ -160,18 +170,22 @@ class GPT(torch.nn.Module):
         for block in self.transformer.blocks:
             out = block(out)
 
-        out = self.transformer.lyr_nrm(out)
+        logits = self.transformer.lyr_nrm(out)
 
-        logit = self.lm_head(out)
+        if trgts is not None:
+            # I'd like to understand the dimensionality of this step better
+            logits = self.lm_head(logits)
 
-        return logit
-        
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)), trgts.view(-1), ignore_index=-1)
 
-    def loss(self, logits, trgts):
-        # I'd like to understand the dimensionality of this step better
-        loss = torch.nn.functional.cross_entropy(
-            logits.view(-1, logits.size(-1)), trgts.view(-1), ignore_index=-1)
-        return loss
+        else:
+            # Note that if we have no targets, we don't need the whole matrix to calculate the loss
+            # Just the last position for generating next tokens
+            logits = self.lm_head(logits[:, [-1], :])
+            loss = None
+
+        return logits, loss
 
     def configure_optimizers(self, model_config, device_type):
         # This enables weight decay for certain parameters in our optimizer
@@ -189,9 +203,6 @@ class GPT(torch.nn.Module):
             {'params': decay_params, 'weight_decay': model_config.weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
-
-        for name, param in self.named_parameters():
-            print(f"{name} is on {param.device}")
 
         num_decay_params = sum(param.numel() for param in decay_params)
         num_nodecay_params = sum(param.numel() for param in nodecay_params)

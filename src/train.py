@@ -4,11 +4,15 @@ from pathlib import Path
 
 from cltk.tokenizers import LatinTokenizationProcess
 from cltk.core.data_types import Doc
+import torch
 
+import torch.autograd.profiler as profiler
 import data_load
 import data_prep
 import model
-import torch
+import utils
+from utils import PAD_INDEX
+
 
 
 class ConfigNode():
@@ -20,14 +24,15 @@ def get_vocab_size(token_data_dir):
     filepath = str(token_data_dir / "encoder.json")
     print(f"Loading vocab from {filepath}")
     with open(filepath, 'r', encoding='utf-8') as file:
-        return len(json.loads(file.read()))
+        vocabsize = len(json.loads(file.read()))
+        return vocabsize
 
 def setup_config_train():
     config_train = ConfigNode()
-    config_train.token_data_dir = Path(__file__).parent.parent / "data" / "token_data"
+    config_train.token_data_dir = Path(__file__).parent.parent / "token_data"
     config_train.batch_size = 32 # Taken from miniGPT, then needed to reduce
-    config_train.num_workers = 4 # From miniGPT
-    config_train.epochs = 1000
+    config_train.num_workers = 8 # From miniGPT
+    config_train.epochs = 1
 
     return config_train
     
@@ -52,16 +57,27 @@ def train(dataloader, model, optimizer, device):
     size = len(dataloader.dataset)
     model.train()
     for batch,  (x, y) in enumerate(dataloader):
+        print("Get batch")
         x, y = x.to(device), y.to(device)
 
         # Compute prediction error
-        pred = model(x)
-        loss = model.loss(pred, y)
+        print("Forward pass")
+        with profiler.profile(with_modules=True) as prof:
+            _, loss = model(x, y)
+        
+        # for name, param in model.named_parameters():
+        #     print(f"{name} is on {param.device}")
 
         # Backpropogation
-        loss.backward()
+        print("Backwards pass")
+        with profiler.record_function("BACKWARDS PASS"):
+            loss.backward()
+        print("grad step")
         optimizer.step()
-        optimizer.zero_grad()
+        print("Zero grad")
+        optimizer.zero_grad(set_to_none=True)
+
+        print(prof.key_averages().table(sort_by="cpu_time_total"))
 
         if batch % 100 == 0:
             loss, current = loss.item(), (batch + 1) * len(x)
@@ -69,10 +85,14 @@ def train(dataloader, model, optimizer, device):
 
     time_now = datetime.datetime.now()
     now_str = time_now.strftime("%d-%m-%Y_%H-%M")
-    torch.save(model.state_dict(), f"model_{datetime}{now_str}.pth")
+    torch.save(model.state_dict(), f"model_{now_str}.pth")
     print("Saved PyTorch Model State to model.pth")
 
-def test(model, new_tokens):
+def test(model, num_new_tokens, config_train, config_model, temperature=1.0, rnd_sampling=False):
+    """
+    Takes sentences from our input file "test_sents.txt", pads them, extends them,
+    and writes them to a file. Referenced from nanoGPT's model.generate function.
+    """
     # set the model in eval mode
     model.eval()
 
@@ -84,22 +104,87 @@ def test(model, new_tokens):
 
     # encode input sentences
     # SUGGESTION: make a tokenize_latin_sentence and move to util?
-    sents_in_enc = []
+    tokenizer_process = LatinTokenizationProcess()
+    sents_in_tok = [] # sentences in tokenized
     for sent_in in sents_in:
-        tokenizer_process = LatinTokenizationProcess()
-        tokenized_doc = tokenizer_process.run(input_doc=Doc(raw=sent_in))
-        return tokenized_doc.tokens
+        token_sent = tokenizer_process.run(input_doc=Doc(raw=sent_in)).tokens
+        sents_in_tok.append(token_sent)
 
-    # reshape/pad as needed
-    for idx, sent_in in enumerate(sents_in):
-        sents_in[idx] = sent_in if sent_in.size(1) <= config_model.block_length else 
+    token_data_dir = config_train.token_data_dir
+    enc_filepath = str(token_data_dir / "encoder.json")
+    with open(enc_filepath, 'r', encoding='utf-8') as file:
+        encoder = json.loads(file.read())
+
+    # sentences in encoded
+    # hmm we need to map unknown tokens to [unk] or something
+    try:
+        sents_in_enc = [[encoder[token] for token in row] for row in sents_in_tok]
+    except KeyError:
+        pass
+
+    # reshape/pad as needed as arrays
+    for sent_in in sents_in_enc:
+        if len(sent_in) > config_model.block_length:
+            sent_in = sent_in[-config_model.block_length:]
+        if len(sent_in) < config_model.block_length:
+            pads = [PAD_INDEX] * (config_model.block_length - len(sent_in))
+            sent_in = pads + sent_in
+            print(sent_in)
+
+        assert len(sent_in) == config_model.block_length, f"Found sentence of invalid length. \
+              Expected a length of {config_model.block_length} and got {len(sent_in)}"
+
+    # convert all to tensor
+    sents_tensor = torch.LongTensor(sents_in_enc)
+    sents_tensor = sents_tensor.to(config_model.device)    
 
     # load them all into model
-    sents_out = []
-    for sent_in in sents_in:
-        sents_out.append(model(sent_in))
+    for _ in range(num_new_tokens):
+        # we'll need to reclip as we keep appending
+        temp_sents = sents_tensor if sents_tensor.size(1) <= config_model.block_length \
+            else sents_tensor[:, -config_model.block_length]
+
+        # temp_sents.to(config_model.device)
+        logits, _ = model(temp_sents.cuda())
+
+        logits = logits[:, -1, :]
+        logits /= temperature
+
+        probs = torch.nn.functional.softmax(logits, dim=-1)
+
+        if rnd_sampling:
+            next_token = torch.multinomial(probs, num_samples=1)
+
+        else:
+            _, next_token = torch.topk(probs, k=1, dim=-1)
+
+        
+        sents_tensor = torch.cat((sents_tensor, next_token), dim=1)
 
     # write all the out sentences to a dated output file
+    dec_filepath = str(token_data_dir / "decoder.json")
+    with open(dec_filepath, 'r', encoding='utf-8') as file:        
+        decoder = json.loads(file.read())
+
+    decoder = utils.convert_dict_string_string_to_dict_int_string(decoder)    
+
+    decoded_tokens = [[decoder[entry.item()] for entry in row] for row in sents_tensor]
+
+    finished_sents = [' '.join(sent) for sent in decoded_tokens]
+
+    time_now = datetime.datetime.now()
+    now_str = time_now.strftime("%d-%m-%Y_%H-%M")
+
+    output_dir = Path(__file__).resolve().parent.parent / "train_output"
+    file_out = output_dir / ("output_" + now_str + ".txt")
+    
+    output_dir.mkdir(exist_ok=True)
+
+    # we're going to assume that spaces don't count as tokens 
+    # delete this comment when we confirm this
+    with open(file_out, 'w+', encoding='utf-8') as fo:
+        fo.writelines(finished_sents)
+        
 
 if __name__ == "__main__":
     print("Preparing data...")
@@ -113,8 +198,7 @@ if __name__ == "__main__":
             if torch.backends.mps.is_available()
             else "cpu"
             )
-    
-    torch.device = device
+        
     print(f"Using {device} as the device")
 
     # Set up all trainer params
@@ -125,9 +209,10 @@ if __name__ == "__main__":
     config_model = setup_model_config(config_train.token_data_dir)
     print("Model params set!")
     config_model.device = device
+    # DEBUG REMOVE
+    torch.cuda.synchronize()
 
     # run data_prep if it hasn't already #TODO: make an argument for this
-    
     dataset = data_load.TokenizedLatinDataset(
         config_train.token_data_dir, config_model.block_length)
     dataloader = torch.utils.data.DataLoader(
@@ -153,8 +238,10 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
 
     epochs = config_train.epochs
+    num_new_tokens = 32
     for t in range(epochs):
         print(f"Epoch {t + 1}\n" + "-" * 30)
         train(dataloader, model, optimizer, device)
-        # test(test_dataloader, model, loss_fn)
+        #test(model, num_new_tokens, config_train,
+        #     config_model, temperature=1.0, rnd_sampling=False)
     print("Done!")
