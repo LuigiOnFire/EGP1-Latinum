@@ -1,0 +1,4 @@
+- make regex to get rid of [number]
+- Actually load the config from the json lol (or from the model?), needs to be considered carefully for what gets loaded
+- make the randomized indices actually show up
+- Switch tokenizer to BPE?

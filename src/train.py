@@ -1,25 +1,24 @@
-import datetime
+import argparse
+from datetime import datetime, timedelta
 import json
+import math
 from pathlib import Path
 
 from cltk.tokenizers import LatinTokenizationProcess
 from cltk.core.data_types import Doc
+import shutil
 import torch
 
 import torch.autograd.profiler as profiler
 import data_load
 import data_prep
 import model
+import random
+import test
+import tokenizer_spm
 import utils
-from utils import PAD_INDEX
 
-
-
-class ConfigNode():
-    # Note: if this needs to be extended for any reason in the future
-    # just use yacs instead
-    pass
-
+# only useful if you want to use the CLTK tokenizer
 def get_vocab_size(token_data_dir):
     filepath = str(token_data_dir / "encoder.json")
     print(f"Loading vocab from {filepath}")
@@ -27,169 +26,295 @@ def get_vocab_size(token_data_dir):
         vocabsize = len(json.loads(file.read()))
         return vocabsize
 
-def setup_config_train():
-    config_train = ConfigNode()
-    config_train.token_data_dir = Path(__file__).parent.parent / "token_data"
-    config_train.batch_size = 32 # Taken from miniGPT, then needed to reduce
-    config_train.num_workers = 8 # From miniGPT
-    config_train.epochs = 1
+# taken from nanoGPT, seems like a cool idea
+def get_decayed_lr(iter, config_train):
 
-    return config_train
+    # unpack a bit to make code more legible
+    warmup_iters = config_train["warmup_iters"]
+    cooldown_iters = config_train["cooldown_iters"]
+    lr_sml = config_train["learning_rate_sml"]
+    lr_lrg = config_train["learning_rate_lrg"]
+
+    # three cases
+    # Still warming up...
+    if iter < warmup_iters:
+        return lr_lrg * iter / warmup_iters
+    # Cosine arc between warmup and decay
     
-def setup_model_config(token_data_dir):
-    config_model = ConfigNode()
-    config_model.embedding_dim = 192 # From miniGPT's miniGPT, start small maybe bigger later
-    config_model.bias = None # bias for the linear layers in the mlp 
-    config_model.embed_dropout = 0 # miniGPT says 0 for pretraining, 0.1 for finetuning
-    config_model.resid_dropout = 0 # if we have overfitting issues let's revisit this
-    config_model.attn_dropout = 0
-    config_model.attn_head_count = 6 # from minigpt
-    config_model.block_length = 512 # reduced from minigpt 
-    config_model.layer_count = 6 #from minigpt
-    config_model.token_count = get_vocab_size(token_data_dir)
-    config_model.learning_rate = 5e-4 # from minigpt 
-    config_model.betas = (0.9, 0.95)
-    config_model.weight_decay = 0.1 # from minigpt
+    if warmup_iters <= iter <= cooldown_iters:
+        cooldown_ratio = (iter - warmup_iters) / (cooldown_iters - warmup_iters)
+        assert 0 <= cooldown_ratio <= 1
 
-    return config_model
+        # the cosine swings from +1 to -1
+        # so this coeff swings from 0 to -1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * cooldown_ratio))
+        return lr_sml + coeff * (lr_lrg - lr_sml)
+    
+    assert iter > cooldown_iters # this is the only condition under which we should reach here
+    return lr_sml
 
-def train(dataloader, model, optimizer, device):
+def show_training_data(x, y, logits, tokenizer_dir, num=None):
+    if num == None:
+        num = len(x)
+    last_tokens = 16
+    in_decoded = [tokenizer_spm.decode_string(row[-last_tokens:].tolist(), tokenizer_dir) for row in x]
+
+    logits = logits[:, -1, :]    
+    probs = torch.nn.functional.softmax(logits, dim=-1)
+    _, next_token = torch.topk(probs, k=1, dim=-1)
+    guessed_decoded = [tokenizer_spm.decode_string(row.tolist(), tokenizer_dir) for row in next_token]
+
+    ans_encoded = y
+    ans_decoded = [tokenizer_spm.decode_string(row.tolist()[-1], tokenizer_dir) for row in ans_encoded]
+    
+    # only bother with the first one, but you can easily print all of them if you want
+
+    for i in range(num):
+        print("The sentence is:")
+        print(in_decoded[i])
+        print(f"We guessed: {guessed_decoded[i]}")
+        print(f"The correct answer was: {ans_decoded[i]}")
+        print("\n")
+
+def train(dataloader, model, optimizer, device, model_data, config_train, log_text, model_dir, tokenizer_dir):
+    backup_time = timedelta(minutes = 60)
+
     size = len(dataloader.dataset)
-    model.train()
-    for batch,  (x, y) in enumerate(dataloader):
-        print("Get batch")
+
+    batch_checkpoint = model_data["batch_checkpoint"]    
+    losses = model_data["partial_loss_history"]
+    num_new_tokens = 32 # for when we test
+
+    # Not sure you can acces batch_size with dataloader.batch_size, could be a problem here
+    iter = batch_checkpoint + 1 # if this starts at 0 it zeros out our lr
+
+    # We made need to convert this later on if this causes problems
+    time_started = datetime.strptime(model_data["time_last_trained"], "%d-%m-%Y_%H-%M-%S")
+
+    lr = config_model["learning_rate"]
+    old_loss = None
+    
+    for batch, (x, y) in enumerate(dataloader):
+        model.train()
+
+        if config_train["lr_decay"] == True:
+            lr = get_decayed_lr(iter, config_train)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+
         x, y = x.to(device), y.to(device)
 
         # Compute prediction error
-        print("Forward pass")
-        with profiler.profile(with_modules=True) as prof:
-            _, loss = model(x, y)
-        
-        # for name, param in model.named_parameters():
-        #     print(f"{name} is on {param.device}")
+        with ctx:
+            logits, loss = model(x, y)
 
         # Backpropogation
-        print("Backwards pass")
-        with profiler.record_function("BACKWARDS PASS"):
-            loss.backward()
-        print("grad step")
-        optimizer.step()
-        print("Zero grad")
-        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        if config_train["grad_clip"] is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config_train["grad_clip"])
 
-        print(prof.key_averages().table(sort_by="cpu_time_total"))
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
         if batch % 100 == 0:
             loss, current = loss.item(), (batch + 1) * len(x)
-            print(f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]")   
+            losses.append(loss)
+            loss_status = f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]"
+            lr_status = f"Using an lr of {lr}"
 
-    time_now = datetime.datetime.now()
-    now_str = time_now.strftime("%d-%m-%Y_%H-%M")
-    torch.save(model.state_dict(), f"model_{now_str}.pth")
-    print("Saved PyTorch Model State to model.pth")
+            print(loss_status)
+            print(lr_status)            
+            show_training_data(x, y, logits, tokenizer_dir, 1) # can be factored out to happen more often for fun!
 
-def test(model, num_new_tokens, config_train, config_model, temperature=1.0, rnd_sampling=False):
-    """
-    Takes sentences from our input file "test_sents.txt", pads them, extends them,
-    and writes them to a file. Referenced from nanoGPT's model.generate function.
-    """
-    # set the model in eval mode
-    model.eval()
+            log_text += f"\n{loss_status}"
+            log_text += f"\n{lr_status}"
 
-    # load all the sentences from the file
-    script_dir = Path(__file__).resolve().parent
-    file_in = script_dir / "test_sents.txt"
-    with open(file_in, 'r', encoding='utf-8') as fi:
-        sents_in = fi.readlines()
+            time_elapsed = datetime.now() - time_started
 
-    # encode input sentences
-    # SUGGESTION: make a tokenize_latin_sentence and move to util?
-    tokenizer_process = LatinTokenizationProcess()
-    sents_in_tok = [] # sentences in tokenized
-    for sent_in in sents_in:
-        token_sent = tokenizer_process.run(input_doc=Doc(raw=sent_in)).tokens
-        sents_in_tok.append(token_sent)
+            if time_elapsed >= backup_time:
 
-    token_data_dir = config_train.token_data_dir
-    enc_filepath = str(token_data_dir / "encoder.json")
-    with open(enc_filepath, 'r', encoding='utf-8') as file:
-        encoder = json.loads(file.read())
+                # "+ 1" so that checkpoint can mean "the first batch we do"
+                # and hence have a default of 0
+                test_loss = test.test(model, tokenizer_dir, config_model, config_train, 100, ctx)
+                model_data["loss_history_test"].append(test_loss)
+                model_data["batch_checkpoint"] = batch + 1
+                model_data["partial_loss_history"] = losses
+                model_dir = save_model(model, model_data, all_models_dir, log_text, model_dir)
+                # Trying to see if topk=5 gives us better results
+                test.gen_test(model, num_new_tokens,
+                    config_model, tokenizer_dir, temperature=1.0, rnd_sampling=True, top_k=8)                
+                
+                # reset the time we measure from
+                time_started = datetime.now()
+        # if old_loss and old_loss < 7 and loss > 7 and loss - old_loss > 0.75:
+        #     print("Possible collapse detected!")
+        #     show_training_data(x, y, logits, tokenizer_dir)
 
-    # sentences in encoded
-    # hmm we need to map unknown tokens to [unk] or something
-    try:
-        sents_in_enc = [[encoder[token] for token in row] for row in sents_in_tok]
-    except KeyError:
-        pass
-
-    # reshape/pad as needed as arrays
-    for sent_in in sents_in_enc:
-        if len(sent_in) > config_model.block_length:
-            sent_in = sent_in[-config_model.block_length:]
-        if len(sent_in) < config_model.block_length:
-            pads = [PAD_INDEX] * (config_model.block_length - len(sent_in))
-            sent_in = pads + sent_in
-            print(sent_in)
-
-        assert len(sent_in) == config_model.block_length, f"Found sentence of invalid length. \
-              Expected a length of {config_model.block_length} and got {len(sent_in)}"
-
-    # convert all to tensor
-    sents_tensor = torch.LongTensor(sents_in_enc)
-    sents_tensor = sents_tensor.to(config_model.device)    
-
-    # load them all into model
-    for _ in range(num_new_tokens):
-        # we'll need to reclip as we keep appending
-        temp_sents = sents_tensor if sents_tensor.size(1) <= config_model.block_length \
-            else sents_tensor[:, -config_model.block_length]
-
-        # temp_sents.to(config_model.device)
-        logits, _ = model(temp_sents.cuda())
-
-        logits = logits[:, -1, :]
-        logits /= temperature
-
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-
-        if rnd_sampling:
-            next_token = torch.multinomial(probs, num_samples=1)
-
-        else:
-            _, next_token = torch.topk(probs, k=1, dim=-1)
-
+        old_loss = loss
         
-        sents_tensor = torch.cat((sents_tensor, next_token), dim=1)
+        iter += 1
 
-    # write all the out sentences to a dated output file
-    dec_filepath = str(token_data_dir / "decoder.json")
-    with open(dec_filepath, 'r', encoding='utf-8') as file:        
-        decoder = json.loads(file.read())
+    model_data["batch_checkpoint"] = 0
+    avg_loss = sum(losses) / len(losses)
+    print(f"Average loss: {avg_loss}")
+    model_data["loss_history"].append(avg_loss)
+    model_data["partial_loss_history"] = []
+    model_data["epochs_trained"] += 1
+    model_dir = save_model(model, model_data, all_models_dir, log_text, model_dir)
+    test.gen_test(model, num_new_tokens,
+        config_model, tokenizer_dir, temperature=1.0, rnd_sampling=True, top_k=8)
 
-    decoder = utils.convert_dict_string_string_to_dict_int_string(decoder)    
+def update_time_last_trained(model_data):
+    time_now = datetime.now()
+    now_str_long = datetime.strftime(time_now, "%d-%m-%Y_%H-%M-%S")
+    model_data["time_last_trained"] = now_str_long
 
-    decoded_tokens = [[decoder[entry.item()] for entry in row] for row in sents_tensor]
+def init_new_model_data(work_names, config_model, model_name):
+    # other data we need
+    # model_id
+    # workcount + date + trainstart
+    time_now = datetime.now()
+    # strftiem makes a string
+    now_str_short = datetime.strftime(time_now, "%d%m%Y%H%M%S")
+    now_str_long = datetime.strftime(time_now, "%d-%m-%Y_%H-%M-%S")
 
-    finished_sents = [' '.join(sent) for sent in decoded_tokens]
+    # optional name for the model
+    # hoping args knows the default to None
+    model_data["model_name"] = model_name
+        
+    work_count = len(work_names)
+    serial_no = f"{work_count}_{now_str_short}_{now_str_short}"
 
-    time_now = datetime.datetime.now()
-    now_str = time_now.strftime("%d-%m-%Y_%H-%M")
-
-    output_dir = Path(__file__).resolve().parent.parent / "train_output"
-    file_out = output_dir / ("output_" + now_str + ".txt")
+    if model_data["model_name"] is not None:
+        serial_no = f"{model_data['model_name']}_{serial_no}"
     
-    output_dir.mkdir(exist_ok=True)
+    model_data["serial_no"] = serial_no
 
-    # we're going to assume that spaces don't count as tokens 
-    # delete this comment when we confirm this
-    with open(file_out, 'w+', encoding='utf-8') as fo:
-        fo.writelines(finished_sents)
+    # epochs trained before
+    model_data["epochs_trained"] = 0
+
+    # batches done in last epoch
+    model_data["batch_checkpoint"] = 0
+
+    # time model started
+    # let's be consistent and make these always strings
+    model_data["time_first_trained"] = now_str_long
+
+    # time last trained
+    # let's be consistent and make these always long strings
+    model_data["time_last_trained"] = now_str_long
+
+    # total time trained    
+    # time_trained will always be in seconds
+    model_data["time_trained"] = 0
+
+    # on which texts trained
+    model_data["works_trained_on"] = work_names
+
+    # all model params
+    model_data["config_model"] = config_model
+
+    # losses over each epoch
+    model_data["loss_history"] = []
+
+    # losses in training data
+    model_data["loss_history_test"] = []
+
+    # loss history within a particular epoch, in case we need to load mid epoch
+    model_data["partial_loss_history"] = []
+
+    # random seed for data loader
+    model_data["data_seed"] = random.randint(0, 2048)    
+
+    return model_data
+
+def save_model(model, model_data, all_models_dir, log_text, old_model_dir):
+    # The short form is for the serial number
+    # The long form is for the standaloen fields
+    
+    str_format_long = "%d-%m-%Y_%H-%M-%S"
+    str_format_short = "%d%m%Y%H%M%S"
+
+    time_now = datetime.now()
+    
+    now_str_short = time_now.strftime(str_format_short)
+    now_str_long = time_now.strftime(str_format_long)
+
+    # update time trained 
+    # whenever we assign this to model_data, it should be in raw seconds
+    time_last_trained = datetime.strptime(model_data["time_last_trained"], "%d-%m-%Y_%H-%M-%S")
+    prev_time_trained = float(model_data["time_trained"])
+    new_time_trained = (datetime.now() - time_last_trained).total_seconds()
+    total_time_trained = (prev_time_trained + new_time_trained)
+    model_data["time_trained"] = total_time_trained
+
+    # make building serial no its own function
+    model_data["time_last_trained"] = now_str_long    
+
+    # should put this in the model directory too ideally
+    serial_no_old = model_data["serial_no"]
+    serial_no_split = serial_no_old.split("_")
+    serial_no_split[-1] = now_str_short
+    serial_no = "_".join(serial_no_split)    
+    model_data["serial_no"] = serial_no
+
+    model_dir = all_models_dir / serial_no
+    Path.mkdir(model_dir, exist_ok=True)
+
+    pth_path = model_dir / (serial_no + ".pth")
+    json_path = model_dir / (serial_no + ".json")
+    txt_path = model_dir / (serial_no + ".txt")
+
+    torch.save(model.state_dict(), pth_path)
+    print("Saved PyTorch Model State to model.pth") 
+
+    with open(json_path, 'w') as f:
+        json.dump(model_data, f, default=str, indent=4)
+
+    with open(txt_path, 'w') as f:
+        f.write(log_text)    
+
+    # if our model contains it's own tokenizer
+    if (old_model_dir / "m.vocab").exists():
+        shutil.copy(old_model_dir / "m.vocab", model_dir / "m.vocab") 
+        shutil.copy(old_model_dir / "m.model", model_dir / "m.model") 
+
+    return model_dir    
+
+def initialize_randomize_dataloader(dataset, model_data, random_loader):
+    log_index = ""
+    if random_loader:
+        data_seed = model_data["data_seed"]
+        torch.manual_seed(data_seed)
+        shuffled_indices = torch.randperm(len(dataset))
+        batch_checkpoint = model_data["batch_checkpoint"]    
         
+        shuffled_indices = shuffled_indices[batch_checkpoint:]
+
+
+        # THIS IS FOR DEBUG
+        log_index = f"The random indices are {shuffled_indices}\n"
+
+        dataset = torch.utils.data.Subset(dataset, shuffled_indices) 
+
+    dataloader = torch.utils.data.DataLoader(
+        dataset, 
+        batch_size=config_train["batch_size"], 
+        shuffle=False,
+        pin_memory = True,
+        num_workers = config_train["num_workers"]
+    )
+
+    return dataloader, log_index
 
 if __name__ == "__main__":
-    print("Preparing data...")
-    data_prep.prep_data()
-    print("Data prepared!")
+    random_loader = True
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--model", dest="model_dir", help="Directory containing model data", nargs='?')
+    parser.add_argument("-mt", "--model_type", dest="model_type", help="Grab settings for new model sizing", nargs='?')
+    parser.add_argument("-n", "--name", dest="model_name", help="Get an optional name for the new model", nargs='?')
+
+    args = parser.parse_args()
 
     device = (
             "cuda"
@@ -198,50 +323,109 @@ if __name__ == "__main__":
             if torch.backends.mps.is_available()
             else "cpu"
             )
-        
+
     print(f"Using {device} as the device")
 
     # Set up all trainer params
-    config_train = setup_config_train()
-    print("Training params set!")
+
+    config_train = utils.setup_config_train()
+    print("Training params set!")    
 
     # Set up all model params
-    config_model = setup_model_config(config_train.token_data_dir)
+    config_model = utils.setup_model_config()
     print("Model params set!")
-    config_model.device = device
-    # DEBUG REMOVE
-    torch.cuda.synchronize()
+    config_model = utils.use_preset_config_model(config_model, args.model_type)
 
-    # run data_prep if it hasn't already #TODO: make an argument for this
-    dataset = data_load.TokenizedLatinDataset(
-        config_train.token_data_dir, config_model.block_length)
-    dataloader = torch.utils.data.DataLoader(
-        dataset, 
-        batch_size=config_train.batch_size, 
-        shuffle=False,
-        pin_memory = True, # not sure what this is
-        num_workers = config_train.num_workers
-    )    
+    config_model["device"] = device
 
-    print("Initializing GPT model...")
     model =  model.GPT(config_model)
-    print("Model prepared!")
+    print("Model prepared!")    
 
+    # dictionary to save to json to save data about the model
+    model_data = {}
+    all_models_dir = utils.all_models_dir
+    Path.mkdir(all_models_dir, exist_ok=True)   
+
+    # if new model
+    if args.model_dir == None:
+         # run data_prep if it hasn't already #TODO: make an argument for this
+        print("Preparing data...")
+        _, work_names = data_prep.current_works()
+        print("Data prepared!")
+
+        model_data = init_new_model_data(work_names, config_model, args.model_name)
+        log_text = ""
+        model_dir = all_models_dir / model_data["serial_no"]
+        Path.mkdir(model_dir, exist_ok=False)
+        # data_prep.prep_data(model_dir)
+
+    else:
+    # if model directory specified
+    # Load the state dictionary into your model
+        model_dir = all_models_dir / args.model_dir
+        loaded_state_dict = None
+        data_json = None
+        log_text = None
+        for f in model_dir.iterdir():
+            if f.suffix == ".pth":
+                loaded_state_dict = f
+
+            elif f.suffix == ".json":
+                data_json = f                
+            
+            elif f.suffix == ".txt":
+                log_txt = f
+        
+        print(loaded_state_dict)
+        model.load_state_dict(torch.load(loaded_state_dict))
+
+        # load model data json
+        with open(data_json, 'r', encoding="utf8") as file:
+            model_data = json.load(file)
+            update_time_last_trained(model_data)
+            if args.model_name: # this lets us rename the model if we want
+                model_data["model_name"] = args.model_name
+        
+        with open(log_txt, 'r', encoding="utf8") as file:
+            # the distinction between log_txt and log_text is kind of annoying but it's workable
+            log_text = file.read()
+    
+    device_type = 'cuda' if 'cuda' in device else 'cpu'
+
+    torch_dtype_lookup = {
+        'float32': torch.float32,
+        'bfloat16': torch.bfloat16,
+        'float16': torch.float16
+    }
+    ptdtype = torch_dtype_lookup[config_train["dtype"]]
+    ctx = torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+        
     model.to(device)
 
-    device_type = 'cuda' if 'cuda' in device else 'cpu'
     print("Configuring optimizer...")
     optimizer = model.configure_optimizers(config_model, device_type)
 
-    print(f"Tokensize was {config_model.token_count}")
+    tokenizer_dir = Path.home() / "latin-literature-dataset-170M" / "tokenizer_model"
+
+    dataset = data_load.TokenizedLatinDataset(
+        config_train["token_data_dir"], config_model["block_length"])    
+
+    # make a random seed for the dataloader that can be preserved across runs
+    dataloader, index_log = initialize_randomize_dataloader(dataset, model_data, random_loader)
+    log_text += index_log
+
+    print(f"Tokensize was {config_model['token_count']}")
 
     torch.cuda.empty_cache()
 
-    epochs = config_train.epochs
-    num_new_tokens = 32
-    for t in range(epochs):
-        print(f"Epoch {t + 1}\n" + "-" * 30)
-        train(dataloader, model, optimizer, device)
-        #test(model, num_new_tokens, config_train,
-        #     config_model, temperature=1.0, rnd_sampling=False)
+    epochs = config_train["epochs"]
+    prev_epochs = model_data["epochs_trained"]
+    for t in range(prev_epochs, epochs):
+        epoch_message = f"Epoch {t + 1}\n" + "-" * 30 +"\n"
+        log_text += epoch_message
+        print(epoch_message)
+        train(dataloader, model, optimizer, device, model_data, config_train, log_text, model_dir, tokenizer_dir)
+        # recreate dataloder 
+        dataloader, log_txt = initialize_randomize_dataloader(dataset, model_data, random_loader)
+        
     print("Done!")
