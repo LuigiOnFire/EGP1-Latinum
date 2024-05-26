@@ -46,9 +46,9 @@ def pad_trim_input(sents_in_enc, config_model):
 
 def add_token_to_sents(sents_tensor, config_model, model, temperature, rnd_sampling, top_k):
     # we'll need to reclip as we keep appending
-    temp_sents = sents_tensor if sents_tensor.size(1) <= config_model["block_length"] \
+    temp_sents = sents_tensor if sents_tensor.size(0) <= config_model["block_length"] \
         else sents_tensor[:, -config_model["block_length"]:]
-
+    
     logits, _ = model(temp_sents.cuda())
     logits = logits[:, -1, :]
     logits /= temperature
@@ -71,7 +71,6 @@ def add_token_to_sents(sents_tensor, config_model, model, temperature, rnd_sampl
 
     return new_sents_tensor
 
-
 def gen_test(model, num_new_tokens, config_model, tokenizer_dir, temperature=1.0, rnd_sampling=False, top_k=None):
     """
     Takes sentences from our input file "test_sents.txt", pads them, extends them,
@@ -86,20 +85,26 @@ def gen_test(model, num_new_tokens, config_model, tokenizer_dir, temperature=1.0
     # encode input sentences
     sents_in_enc = encode_sent_list(sents_in, tokenizer_dir)
 
-    # reshape/pad as needed as arrays
-    sents_in_enc = pad_trim_input(sents_in_enc, config_model)
-
     # convert all to tensor
-    sents_tensor = torch.LongTensor(sents_in_enc)
-    sents_tensor = sents_tensor.to(config_model["device"])
 
-    # load them all into model and make new tokens
-    for _ in range(num_new_tokens):
-        sents_tensor = add_token_to_sents(sents_tensor, config_model, model, temperature, rnd_sampling, top_k)
+    sents_tensors = [torch.LongTensor(sent_in) for sent_in in sents_in_enc]
+    for i, sent_tensor in enumerate(sents_tensors):
+        sents_tensors[i] = sent_tensor.to(config_model["device"])        
+    
+    generated_tensors = []
+    # load them into model one at a time and make new tokens    
+    for sent_tensor in sents_tensors:
+        sent_tensor = sent_tensor.unsqueeze(0)
+        for _ in range(num_new_tokens):
+            sent_tensor = add_token_to_sents(sent_tensor, config_model, model, temperature, rnd_sampling, top_k)
+        sent_tensor = sent_tensor.squeeze(0)
+        generated_tensors.append(sent_tensor)
+
 
     # decode the sentences and organize into list
-    decoded_tokens = [tokenizer_spm.decode_string(row.tolist(), tokenizer_dir) for row in sents_tensor]
-    print(decoded_tokens)
+    decoded_tokens = [tokenizer_spm.decode_string(row.tolist(), tokenizer_dir) for row in generated_tensors]
+    for sent in decoded_tokens:
+        print(sent)
     finished_sents = '\n'.join(decoded_tokens)
 
     # make output file name
@@ -119,7 +124,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--model", dest="model_dir", help="Directory containing model data", nargs='?')
     parser.add_argument("-mt", "--model_type", dest="model_type", help="Grab settings for new model sizing", nargs='?')
-    parser.add_argument("-n", "--name", dest="model_name", help="Get an optional name for the new model", nargs='?')
+
+    tokenizer_dir = Path.home() / "latin-literature-dataset-170M" / "tokenizer_model"
 
     args = parser.parse_args()
 
@@ -165,18 +171,17 @@ if __name__ == "__main__":
     device_type = 'cuda' if 'cuda' in device else 'cpu'
 
     num_new_tokens = 128 # for when we test
-
         
     model.to(device)
     # load the model 
-    gen_test(model, num_new_tokens, config_model, temperature=0.5, rnd_sampling=True, top_k=1)
+    gen_test(model, num_new_tokens, config_model, tokenizer_dir, temperature=1.0, rnd_sampling=True, top_k=8)
 
 def test(model, model_dir, config_model, config_train, test_batches=400, ctx=nullcontext()):
     # check if our test data exists and if not tokenize it
     # TODO: come up with a better system to choose between our 4 datasets
     # data_prep.prep_test_data(model_dir)
 
-    test_data_dir = utils.test_data_dir
+    test_data_dir = utils.test_data_dir    
 
     dataset = data_load.TokenizedLatinDataset(test_data_dir,
         config_model["block_length"])
@@ -216,6 +221,3 @@ def test(model, model_dir, config_model, config_train, test_batches=400, ctx=nul
     print(f"Test Error: Avg loss: {avg_loss:>8f}\n")
 
     return avg_loss
-
-if __name__ == "__main__":
-    test()

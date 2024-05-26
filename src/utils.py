@@ -24,15 +24,18 @@ def setup_config_train():
     config_train["batch_size"] = 8
     config_train["num_workers"] = 12 
     config_train["epochs"] = 12
-    config_train["learning_rate_lrg"] = 1.3e-4
-    config_train["learning_rate_sml"] = 0.1 * config_train["learning_rate_lrg"] # taken from nanoGPT;
+    config_train["learning_rate_lrg"] = 6e-4
+    config_train["learning_rate_sml"] = 0.1 * config_train["learning_rate_lrg"] # taken from nanoGPT;\    
 
-    total_iters = 150000 # doesn't serve any purpose other than calculation here
+    # doesn't serve any purpose other than calculation here
+    # value again from nanoGPT, although should probably be recalculated
+    total_iters = 4000000             
     config_train["warmup_iters"] = 2000 
     config_train["cooldown_iters"] = total_iters
-    config_train["lr_decay"] = False # bool, idea from nanoGPT
+    config_train["lr_decay"] = True # bool, idea from nanoGPT
     config_train["dtype"] = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() \
         else 'float16'
+    config_train["grad_accumulation_steps"] = 40 # nanoGPT uses 5 * 8 = 40, not sure why 5 * 8 is significant
     
     print(f"We ended up using {config_train['dtype']}")
     

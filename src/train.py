@@ -28,7 +28,6 @@ def get_vocab_size(token_data_dir):
 
 # taken from nanoGPT, seems like a cool idea
 def get_decayed_lr(iter, config_train):
-
     # unpack a bit to make code more legible
     warmup_iters = config_train["warmup_iters"]
     cooldown_iters = config_train["cooldown_iters"]
@@ -92,8 +91,14 @@ def train(dataloader, model, optimizer, device, model_data, config_train, log_te
     time_started = datetime.strptime(model_data["time_last_trained"], "%d-%m-%Y_%H-%M-%S")
 
     lr = config_model["learning_rate"]
-    old_loss = None
-    
+
+    # integer division, doesn't need to be exact
+    log_period = 100 // config_train["grad_accumulation_steps"]
+
+    # ... however we wouldn't want it to be zero!
+    if log_period == 0:
+        log_period = config_train["grad_accumulation_steps"]
+
     for batch, (x, y) in enumerate(dataloader):
         model.train()
 
@@ -108,49 +113,48 @@ def train(dataloader, model, optimizer, device, model_data, config_train, log_te
         with ctx:
             logits, loss = model(x, y)
 
+            # scale the gradient as well accumulate it in our pseudo-batch
+            scaled_loss = loss / config_train["grad_accumulation_steps"] 
+
         # Backpropogation
-        loss.backward()
+        scaled_loss.backward()
         if config_train["grad_clip"] is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), config_train["grad_clip"])
 
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
+        if batch % config_train["grad_accumulation_steps"] == 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
-        if batch % 100 == 0:
-            loss, current = loss.item(), (batch + 1) * len(x)
-            losses.append(loss)
-            loss_status = f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]"
-            lr_status = f"Using an lr of {lr}"
+            if batch % log_period == 0:
+                loss, current = loss.item(), (batch + 1) * len(x)
+                losses.append(loss)
+                loss_status = f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]"
+                lr_status = f"Using an lr of {lr}"
 
-            print(loss_status)
-            print(lr_status)            
-            show_training_data(x, y, logits, tokenizer_dir, 1) # can be factored out to happen more often for fun!
+                print(loss_status)
+                print(lr_status)            
+                show_training_data(x, y, logits, tokenizer_dir, 1) # can be factored out to happen more often for fun!
 
-            log_text += f"\n{loss_status}"
-            log_text += f"\n{lr_status}"
+                log_text += f"\n{loss_status}"
+                log_text += f"\n{lr_status}"
 
-            time_elapsed = datetime.now() - time_started
+                time_elapsed = datetime.now() - time_started
 
-            if time_elapsed >= backup_time:
+                if time_elapsed >= backup_time:
 
-                # "+ 1" so that checkpoint can mean "the first batch we do"
-                # and hence have a default of 0
-                test_loss = test.test(model, tokenizer_dir, config_model, config_train, 100, ctx)
-                model_data["loss_history_test"].append(test_loss)
-                model_data["batch_checkpoint"] = batch + 1
-                model_data["partial_loss_history"] = losses
-                model_dir = save_model(model, model_data, all_models_dir, log_text, model_dir)
-                # Trying to see if topk=5 gives us better results
-                test.gen_test(model, num_new_tokens,
-                    config_model, tokenizer_dir, temperature=1.0, rnd_sampling=True, top_k=8)                
-                
-                # reset the time we measure from
-                time_started = datetime.now()
-        # if old_loss and old_loss < 7 and loss > 7 and loss - old_loss > 0.75:
-        #     print("Possible collapse detected!")
-        #     show_training_data(x, y, logits, tokenizer_dir)
-
-        old_loss = loss
+                    # "+ 1" so that checkpoint can mean "the first batch we do"
+                    # and hence have a default of 0
+                    test_loss = test.test(model, tokenizer_dir, config_model, config_train, 100, ctx)
+                    model_data["loss_history_test"].append(test_loss)
+                    model_data["batch_checkpoint"] = iter + 1
+                    model_data["partial_loss_history"] = losses
+                    model_dir = save_model(model, model_data, all_models_dir, log_text, model_dir)
+                    # Trying to see if topk=5 gives us better results
+                    test.gen_test(model, num_new_tokens,
+                        config_model, tokenizer_dir, temperature=1.0, rnd_sampling=True, top_k=8)                
+                    
+                    # reset the time we measure from
+                    time_started = datetime.now()
         
         iter += 1
 
@@ -405,6 +409,7 @@ if __name__ == "__main__":
     print("Configuring optimizer...")
     optimizer = model.configure_optimizers(config_model, device_type)
 
+    # TODO: move
     tokenizer_dir = Path.home() / "latin-literature-dataset-170M" / "tokenizer_model"
 
     dataset = data_load.TokenizedLatinDataset(

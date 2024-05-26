@@ -93,10 +93,8 @@ class Block(torch.nn.Module):
         self.mlp = MultiLevelPerceptron(config)
 
     def forward(self, x):
-        x = self.layernorm1(x)
-        x = self.causal_self_attn(x) + x
-        x = self.layernorm2(x)
-        x = self.mlp(x) + x
+        x = self.causal_self_attn(self.layernorm1(x)) + x
+        x = self.mlp(self.layernorm2(x)) + x
 
         return x
 
