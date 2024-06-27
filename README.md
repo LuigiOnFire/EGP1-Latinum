@@ -22,3 +22,4 @@ And here's a sample of output from near that best-loss point in time, with the p
 
 > **ita fac: uindica te tibi, et tempus quod adhuc aut auferebatur aut subripiebatur aut excidebat collige et serua. persuade tibi hoc sic esse ut scribo:** sic enim et scribo. sed quia sic scripsi, non te rogo ut intellegas: nam et ego te diligo. noli, quaeso, te sic amare
 
+It's not perfect yet, but we can definitely see it's coming along and there's a definite trend of coherences in the way of grammatical agreement between words.
