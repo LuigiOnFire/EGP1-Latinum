@@ -12,10 +12,18 @@ PAD_INDEX = 3
 VOCAB_SIZE = 20000
 
 all_models_dir = Path(__file__).parent.parent / "models"
-
 test_data_dir = Path.home() / "latin-literature-dataset-170M" / "bin_test"
+perseus_cltk_json_data_dir = Path.home() / "cltk_data" / \
+        "lat" / "text" / "lat_text_perseus" / "cltk_json"
 
+lat_tesserae_data_dir = Path.home() / "cltk_data" / \
+    "lat" / "text" / "lat_text_tesserae" / "texts"
 
+lat_library_data_dir = Path.home() / "cltk_data" / \
+    "lat" / "text" / "lat_text_latin_library"
+
+# TODO: move to token_data / train or something
+token_data_dir = Path(__file__).parent.parent / "token_data"
 
 def setup_config_train():
     config_train = {}

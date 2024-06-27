@@ -6,3 +6,14 @@
 # ignore all the data files from Perseus
 *.xml
 *.xml.json
+
+# ignore python caches
+*.pyc
+
+# ignore vscode stuff
+/.vscode
+
+# ignore folders for generated data
+/models
+/token_data
+/train_output

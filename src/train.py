@@ -78,16 +78,15 @@ def show_training_data(x, y, logits, tokenizer_dir, num=None):
 def train(dataloader, model, optimizer, device, model_data, config_train, log_text, model_dir, tokenizer_dir):
     backup_time = timedelta(minutes = 60)
 
+    # used for printing progress updates as we pass through the dataset
     size = len(dataloader.dataset)
 
     batch_checkpoint = model_data["batch_checkpoint"]    
     losses = model_data["partial_loss_history"]
     num_new_tokens = 32 # for when we test
 
-    # Not sure you can acces batch_size with dataloader.batch_size, could be a problem here
     iter = batch_checkpoint + 1 # if this starts at 0 it zeros out our lr
 
-    # We made need to convert this later on if this causes problems
     time_started = datetime.strptime(model_data["time_last_trained"], "%d-%m-%Y_%H-%M-%S")
 
     lr = config_model["learning_rate"]
@@ -173,7 +172,7 @@ def update_time_last_trained(model_data):
     now_str_long = datetime.strftime(time_now, "%d-%m-%Y_%H-%M-%S")
     model_data["time_last_trained"] = now_str_long
 
-def init_new_model_data(work_names, config_model, model_name):
+def init_new_model_data(datasets_used, config_model, model_name):
     # other data we need
     # model_id
     # workcount + date + trainstart
@@ -185,9 +184,8 @@ def init_new_model_data(work_names, config_model, model_name):
     # optional name for the model
     # hoping args knows the default to None
     model_data["model_name"] = model_name
-        
-    work_count = len(work_names)
-    serial_no = f"{work_count}_{now_str_short}_{now_str_short}"
+
+    serial_no = f"{now_str_short}_{now_str_short}"
 
     if model_data["model_name"] is not None:
         serial_no = f"{model_data['model_name']}_{serial_no}"
@@ -213,7 +211,7 @@ def init_new_model_data(work_names, config_model, model_name):
     model_data["time_trained"] = 0
 
     # on which texts trained
-    model_data["works_trained_on"] = work_names
+    model_data["datasets_used"] = datasets_used
 
     # all model params
     model_data["config_model"] = config_model
@@ -354,10 +352,10 @@ if __name__ == "__main__":
     if args.model_dir == None:
          # run data_prep if it hasn't already #TODO: make an argument for this
         print("Preparing data...")
-        _, work_names = data_prep.current_works()
+        datasets_used = data_prep.current_works()
         print("Data prepared!")
 
-        model_data = init_new_model_data(work_names, config_model, args.model_name)
+        model_data = init_new_model_data(datasets_used, config_model, args.model_name)
         log_text = ""
         model_dir = all_models_dir / model_data["serial_no"]
         Path.mkdir(model_dir, exist_ok=False)

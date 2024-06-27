@@ -360,18 +360,12 @@ def prep_data(model_dir):
     """
     This is the top level function of this file
     """
-    # TODO: move these to utils
-    perseus_cltk_json_data_dir = Path.home() / "cltk_data" / \
-        "lat" / "text" / "lat_text_perseus" / "cltk_json"
-    
-    lat_tesserae_data_dir = Path.home() / "cltk_data" / \
-        "lat" / "text" / "lat_text_tesserae" / "texts"
 
-    lat_library_data_dir = Path.home() / "cltk_data" / \
-        "lat" / "text" / "lat_text_latin_library"
+    perseus_cltk_json_data_dir = utils.perseus_cltk_json_data_dir
+    lat_tesserae_data_dir = utils.lat_library_data_dir
+    lat_library_data_dir = utils.lat_library_data_dir
 
-    # TODO: move to token_data / train or something
-    token_data_dir = Path(__file__).parent.parent / "token_data"
+    token_data_dir = utils.token_data_dir
 
     test_data_dir = utils.test_data_dir    
 
@@ -427,9 +421,8 @@ def prep_data(model_dir):
 # samples ASAP
 def prep_test_data(model_dir): # need model dir just for tokenizer
     """
-    This is the top level function of this file
+    Similar to above but for test data alone
     """
-   
     # TODO: move these to utils
     lat_tesserae_data_dir = Path.home() / "cltk_data" / \
         "lat" / "text" / "lat_text_tesserae" / "texts"
@@ -444,8 +437,6 @@ def prep_test_data(model_dir): # need model dir just for tokenizer
 
     if not lat_library_data_dir.exists():
         download_lat_library_data()
-
-    input()
 
     filenames = data_filenames.get_test_filenames()
 
