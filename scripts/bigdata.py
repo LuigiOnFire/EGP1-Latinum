@@ -1,3 +1,7 @@
+"""
+Used to grab the titles of the file names for use in `src/data_filenames.py`
+"""
+
 import csv
 from pathlib import Path
 

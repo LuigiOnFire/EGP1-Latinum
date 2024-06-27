@@ -1,3 +1,7 @@
+""""
+Used so I can choose exactly which files I want to include in training/validation and remove particular ones if I don't like their data.
+"""
+
 def get_perseus_filenames():
     filenames = [
         "ammianus-marcellinus__rerum-gestarum__latin",
